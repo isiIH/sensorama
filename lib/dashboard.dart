@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'sensor_config.dart';
 import 'chart.dart';
+import 'tcp_conn.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // Configuración estática de los sensores
 final List<SensorConfig> availableSensors = [
@@ -34,12 +36,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
   late SensorConfig _selectedSensor;
   late MetricConfig _selectedMetric;
   bool _isStreaming = true; // Controlar pausar/reanudar
+  late final TCPConn _sensorServer;
+  final int _port = int.parse(dotenv.env['PORT']!);
 
   @override
   void initState() {
     super.initState();
     _selectedSensor = availableSensors[0];
     _selectedMetric = _selectedSensor.metrics[0];
+    _sensorServer = TCPConn(port: _port);
+    _sensorServer.start();
+  }
+
+  @override
+  void dispose() {
+    // TODO: implement dispose
+    super.dispose();
+    _sensorServer.stop();
   }
 
   @override

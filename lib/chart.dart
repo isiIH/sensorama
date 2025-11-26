@@ -202,7 +202,19 @@ class _RealTimeChartState extends State<RealTimeChart> {
                     },
                   ),
                 ),
-                leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)), // Ocultamos Y para limpieza
+                leftTitles: AxisTitles(sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 30,
+                    getTitlesWidget: (value, meta) {
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 0.0),
+                    child: Text(
+                      value.toStringAsFixed(0),
+                      style: const TextStyle(color: Colors.grey, fontSize: 10),
+                    ),
+                  );
+                },
+                )), // Ocultamos Y para limpieza
               ),
 
               // 4. Bordes

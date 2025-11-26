@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'dashboard.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // ---------------------------------------------------------------------------
 // WIDGET PRINCIPAL
 // ---------------------------------------------------------------------------
 
-void main() {
+Future main() async {
+  await dotenv.load(fileName: ".env");
+
   runApp(const MainApp());
 }
 

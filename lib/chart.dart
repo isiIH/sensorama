@@ -1,186 +1,281 @@
 import 'package:flutter/material.dart';
-import 'sensor_config.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'dart:async';
-import 'dart:math' as math;
+import 'package:flutter/scheduler.dart';
+import 'package:intl/intl.dart';
+import 'tcp_conn.dart';
+import 'sensor_config.dart';
 
-// ---------------------------------------------------------------------------
-// WIDGET DEL GRÁFICO STREAMING
-// ---------------------------------------------------------------------------
+// --- RING BUFFER ---
+class RingBuffer {
+  final List<FlSpot> buffer;
+  int index = 0;
+  bool filled = false;
+
+  RingBuffer(int capacity)
+      : buffer = List.filled(capacity, const FlSpot(0, 0));
+
+  void add(double x, double y) {
+    buffer[index] = FlSpot(x, y);
+    index = (index + 1) % buffer.length;
+    if (index == 0) filled = true;
+  }
+
+  List<FlSpot> getVisible(double minX) {
+    if (!filled && index == 0) return [];
+
+    final ordered = !filled
+        ? buffer.sublist(0, index)
+        : [...buffer.sublist(index), ...buffer.sublist(0, index)];
+
+    int firstIndex = ordered.indexWhere((p) => p.x >= minX);
+
+    if (firstIndex == -1) {
+      if (ordered.isNotEmpty && ordered.last.x < minX) {
+        return [ordered.last];
+      }
+      return [];
+    }
+
+    // Punto Fantasma para suavizar la curva al entrar
+    int startIndex = (firstIndex > 0) ? firstIndex - 1 : 0;
+    return ordered.sublist(startIndex);
+  }
+}
 
 class RealTimeChart extends StatefulWidget {
-  final MetricConfig metric;
   final bool isPaused;
-
-  const RealTimeChart({
-    super.key,
-    required this.metric,
-    required this.isPaused,
-  });
+  const RealTimeChart({super.key, required this.isPaused});
 
   @override
   State<RealTimeChart> createState() => _RealTimeChartState();
 }
 
-class _RealTimeChartState extends State<RealTimeChart> {
-  // Lista de puntos a mostrar
-  final List<FlSpot> _points = [];
+class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProviderStateMixin {
+  late final TCPConn _tcpConn;
 
-  // Variables para controlar el tiempo
-  double _currentTime = 0;
-  final double _incTime = 0.05; // Mostrar un nuevo dato simulado cada 0.05s
-  final double _pointLimit = 120; // Número de puntos que muestra el gráfico
-  late final double _windowSize = _incTime * _pointLimit; // Segundos mostrados en pantalla
-  Timer? _timer;
+  // Visual Data (RingBuffers)
+  final List<RingBuffer> _linesData = [];
 
+  // Pending Buffer
+  final List<List<FlSpot>> _pendingDataBuffer = [];
 
-  // Valor actual para mostrar en texto grande
-  double _currentValue = 0;
+  String nameSensor = "";
+  List<String> labels = [];
+  List<String> units = [];
+  int freq = 0;
+  final List<double> _currentValues = [];
+
+  DateTime? _startTime;
+
+  // Colores estilo Neon/Material
+  final List<Color> _lineColors = [
+    Colors.cyanAccent, Colors.pinkAccent, Colors.amberAccent,
+    Colors.greenAccent, Colors.purpleAccent, Colors.lightBlueAccent,
+  ];
+
+  final double _windowDuration = 3; // Vista de ventana en segundos
+  final int _sampleRate = 200;
+  int _counter = 0;
+
+  double _maxX = 0;
+
+  // Auto-scale
+  double _currentMinY = 0;
+  double _currentMaxY = 100;
+  double? _stableMinY;
+  double? _stableMaxY;
+
+  double _pointsToDrawAccumulator = 0.0;
+  late final Ticker _ticker;
 
   @override
   void initState() {
     super.initState();
-    _startTimer();
-  }
-
-  @override
-  void didUpdateWidget(RealTimeChart oldWidget) {
-    super.didUpdateWidget(oldWidget);
-
-    // Si cambiamos de métrica, limpiamos el gráfico para empezar de nuevo
-    if (oldWidget.metric != widget.metric) {
-      _points.clear();
-      _currentTime = 0;
-      _currentValue = 0;
-    }
-
-    // Manejar pausa/play
-    if (widget.isPaused && _timer != null) {
-      _timer?.cancel();
-    } else if (!widget.isPaused && (_timer == null || !_timer!.isActive)) {
-      _startTimer();
-    }
+    _tcpConn = TCPConn();
+    _tcpConn.addListener(_onNewSensorData);
+    _ticker = createTicker(_onTick);
+    _ticker.start();
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _ticker.dispose();
+    _tcpConn.removeListener(_onNewSensorData);
     super.dispose();
   }
 
-  void _startTimer() {
-    // Actualizamos cada 50ms (20 FPS) para fluidez
-    _timer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
-      if (mounted) {
-        _addSimulatedDataPoint();
+  void _onNewSensorData() {
+    if (widget.isPaused || _tcpConn.packets.isEmpty) return;
+
+    final SensorPacket lastPacket = _tcpConn.packets.last;
+    nameSensor = lastPacket.sensorId;
+    labels = lastPacket.labels;
+    units = lastPacket.units;
+    freq = lastPacket.f > 0 ? lastPacket.f : 0;
+
+    int channels = lastPacket.data.first.values.length;
+    while (_pendingDataBuffer.length < channels) {
+      _pendingDataBuffer.add([]);
+      // Buffer circular de seguridad
+      int capacity = ((freq / _sampleRate) * 10).toInt();
+      _linesData.add(RingBuffer(capacity));
+    }
+
+    for (MetricData metricData in lastPacket.data) {
+      _counter++;
+      if(_counter % _sampleRate != 0) continue;
+
+      _startTime ??= metricData.timestamp;
+
+      // Cálculo de X en SEGUNDOS (tiempo relativo)
+      final double x = metricData.timestamp
+          .difference(_startTime!)
+          .inMicroseconds / 1000000.0;
+
+      for (int i = 0; i < metricData.values.length; i++) {
+        if (i < _pendingDataBuffer.length) {
+          _pendingDataBuffer[i].add(FlSpot(x, metricData.values[i]));
+        }
       }
-    });
+    }
   }
 
-  void _addSimulatedDataPoint() {
-    setState(() {
-      // 1. Incrementar tiempo
-      _currentTime += 0.05; // 50ms = 0.05s
+  void _onTick(Duration elapsed) {
+    bool hasChanges = false;
+    double realTimeRate = (freq / _sampleRate) / 60.0;
 
-      // 2. Generar dato aleatorio simulado (Seno + Ruido)
-      // En tu app real, aquí leerías el valor del Bluetooth
-      double noise = (math.Random().nextDouble() - 0.5) * (widget.metric.maxVal - widget.metric.minVal) * 0.1;
-      double baseSignal = math.sin(_currentTime * 2) * (widget.metric.maxVal - widget.metric.minVal) * 0.3;
-      double center = (widget.metric.maxVal + widget.metric.minVal) / 2;
+    int bufferSize = _pendingDataBuffer.isNotEmpty ? _pendingDataBuffer[0].length : 0;
+    double multiplier = 1.0;
+    int oneSecondData = (freq / _sampleRate).round();
 
-      _currentValue = center + baseSignal + noise;
+    if (bufferSize > oneSecondData * 1.5) {
+      multiplier = 1.2;
+    }
+    else if (bufferSize < (oneSecondData * 0.1)) {
+      multiplier = 0.9;
+    } else {
+      multiplier = 1.0;
+    }
 
-      // 3. Añadir punto
-      _points.add(FlSpot(_currentTime, _currentValue));
+      _pointsToDrawAccumulator += (realTimeRate * multiplier);
+      int pointsToExtract = _pointsToDrawAccumulator.floor();
 
-      // 4. Limpieza: Remover puntos que ya salieron de la ventana visual
-      // (minX = _currentTime - _windowSize). Mantenemos un poco de margen.
-      if (_points.length > _pointLimit) {
-        _points.removeAt(0);
+      if (pointsToExtract > 0) {
+        _pointsToDrawAccumulator -= pointsToExtract;
+
+        for (int i = 0; i < _pendingDataBuffer.length; i++) {
+          if (_pendingDataBuffer[i].isNotEmpty) {
+            hasChanges = true;
+            int count = _pendingDataBuffer[i].length < pointsToExtract
+                ? _pendingDataBuffer[i].length : pointsToExtract;
+
+            var points = _pendingDataBuffer[i].sublist(0, count);
+            _pendingDataBuffer[i].removeRange(0, count);
+
+            for(var p in points) {
+              _linesData[i].add(p.x, p.y);
+            }
+
+            if (points.isNotEmpty) {
+              _maxX = points.last.x;
+              if (_currentValues.length <= i) _currentValues.add(0);
+              _currentValues[i] = points.last.y;
+            }
+          }
+        }
       }
-    });
+
+      if (hasChanges) {
+        setState(() {
+          _updateMinMax();
+        });
+      }
+  }
+
+  void _updateMinMax() {
+    double min = double.infinity;
+    double max = double.negativeInfinity;
+    bool hasData = false;
+
+    // Calculamos ventana en segundos (ej. 3.0 segundos)
+    double visibleThreshold = _maxX - _windowDuration;
+
+    for (var ring in _linesData) {
+      var line = ring.getVisible(visibleThreshold);
+      if (line.isNotEmpty) {
+        for (var spot in line) {
+          if (spot.x < visibleThreshold) continue;
+          hasData = true;
+          if (spot.y < min) min = spot.y;
+          if (spot.y > max) max = spot.y;
+        }
+      }
+    }
+
+    if (!hasData) return;
+    if (min == max) { min -= 1; max += 1; }
+
+    const double stepSize = 10.0;
+    double targetMin = (min / stepSize).floor() * stepSize - stepSize;
+    double targetMax = (max / stepSize).ceil() * stepSize + stepSize;
+
+    if (_stableMaxY == null || _stableMinY == null) {
+      _stableMaxY = targetMax;
+      _stableMinY = targetMin;
+      _currentMinY = targetMin;
+      _currentMaxY = targetMax;
+      return;
+    }
+
+    // Lógica de histéresis suave
+    if (targetMax > _stableMaxY!) _stableMaxY = targetMax;
+    if (targetMin < _stableMinY!) _stableMinY = targetMin;
+
+    if (targetMax < _stableMaxY!) _stableMaxY = _stableMaxY! - (_stableMaxY! - targetMax) * 0.05;
+    if (targetMin > _stableMinY!) _stableMinY = _stableMinY! + (targetMin - _stableMinY!) * 0.05;
+
+    _currentMinY = _stableMinY!;
+    _currentMaxY = _stableMaxY!;
   }
 
   @override
   Widget build(BuildContext context) {
-    // Calculamos los límites de la ventana deslizante
-    double minX = _currentTime > _windowSize ? _currentTime - _windowSize : 0;
-    double maxX = _currentTime > _windowSize ? _currentTime : _windowSize;
+    // Conversión de ventana a Segundos para el eje X
+    double minX = _maxX > _windowDuration ? _maxX - _windowDuration : 0;
+    double maxXDisplay = _maxX > _windowDuration ? _maxX : _windowDuration;
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Encabezado con valor numérico
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        // Encabezado con datos actuales
+        Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.metric.name.toUpperCase(),
-                  style: const TextStyle(color: Colors.grey, fontSize: 12, letterSpacing: 1.2),
-                ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text(
-                      _currentValue.toStringAsFixed(2),
-                      style: TextStyle(
-                        color: widget.metric.color,
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                        fontFamily: "monospace", // Fuente monoespaciada evita saltos
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      widget.metric.unit,
-                      style: const TextStyle(color: Colors.white54, fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            // Indicador "LIVE"
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: widget.isPaused ? Colors.grey.withOpacity(0.2) : Colors.red.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: widget.isPaused ? Colors.grey : Colors.red),
-              ),
-              child: Text(
-                widget.isPaused ? "PAUSE" : "● LIVE",
-                style: TextStyle(
-                  color: widget.isPaused ? Colors.white : Colors.red,
-                  fontSize: 10,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            )
+            Text(nameSensor.isEmpty ? "Esperando datos..." : "$nameSensor (${_linesData.length} ch)", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 18)),
+            const SizedBox(height: 4),
+            _buildLegend(),
           ],
         ),
+        const SizedBox(height: 12),
 
-        const SizedBox(height: 20),
-
-        // El Gráfico
+        // GRÁFICO
         Expanded(
           child: LineChart(
             LineChartData(
-              // 1. Optimización: Desactivar interacciones táctiles complejas para rendimiento
+              // --- ESTILO BASADO EN SAMPLE 10 ---
               lineTouchData: const LineTouchData(enabled: false),
-
-              // 2. Cuadrícula
+              clipData: const FlClipData.all(), // Recorta lo que sale del área
               gridData: FlGridData(
                 show: true,
-                drawVerticalLine: true,
-                getDrawingVerticalLine: (value) => const FlLine(color: Colors.white10, strokeWidth: 1),
-                getDrawingHorizontalLine: (value) => const FlLine(color: Colors.white10, strokeWidth: 1),
+                drawVerticalLine: false, // Más limpio sin líneas verticales
+                drawHorizontalLine: true,
+                getDrawingHorizontalLine: (value) => FlLine(
+                  color: Colors.white.withOpacity(0.1),
+                  strokeWidth: 1,
+                ),
               ),
+              borderData: FlBorderData(show: false), // Sin bordes duros
 
-              // 3. Títulos (Ejes)
+              // Ejes
               titlesData: FlTitlesData(
                 show: true,
                 rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -188,77 +283,115 @@ class _RealTimeChartState extends State<RealTimeChart> {
                 bottomTitles: AxisTitles(
                   sideTitles: SideTitles(
                     showTitles: true,
-                    reservedSize: 30,
-                    interval: 1, // Mostrar etiqueta cada segundo
+                    reservedSize: 60,
+                    interval: 1, // Cada 1 segundo
                     getTitlesWidget: (value, meta) {
-                      // Formatear el timestamp a algo legible (ej: segundos)
+                      // Formato de tiempo limpio
+                      if (_startTime == null) return const SizedBox.shrink();
+                      final date = _startTime!.add(Duration(milliseconds: (value * 1000).toInt()));
                       return Padding(
-                        padding: const EdgeInsets.only(top: 8.0),
-                        child: Text(
-                          value.toStringAsFixed(0),
-                          style: const TextStyle(color: Colors.grey, fontSize: 10),
+                        padding: const EdgeInsets.only(top: 10),
+                        child: RotatedBox(
+                          quarterTurns: -1,
+                          child: Text(
+                            DateFormat('HH:mm:ss').format(date),
+                            style: const TextStyle(color: Colors.grey, fontSize: 10),
+                          ),
                         ),
                       );
                     },
                   ),
                 ),
-                leftTitles: AxisTitles(sideTitles: SideTitles(
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
                     showTitles: true,
-                    reservedSize: 30,
-                    getTitlesWidget: (value, meta) {
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 0.0),
-                    child: Text(
-                      value.toStringAsFixed(0),
-                      style: const TextStyle(color: Colors.grey, fontSize: 10),
-                    ),
-                  );
-                },
-                )), // Ocultamos Y para limpieza
-              ),
-
-              // 4. Bordes
-              borderData: FlBorderData(show: false),
-
-              // 5. VENTANA DESLIZANTE (CLAVE DEL STREAMING)
-              minX: minX,
-              maxX: maxX,
-              // Fijamos Y para que el gráfico no salte verticalmente
-              minY: widget.metric.minVal,
-              maxY: widget.metric.maxVal,
-
-              // 6. Configuración de límites (Clipping)
-              clipData: const FlClipData.all(), // Importante: Corta las líneas que salen del área
-
-              // 7. Datos de la línea
-              lineBarsData: [
-                LineChartBarData(
-                  spots: _points,
-                  isCurved: true,
-                  curveSmoothness: 0.15, // Menos curva = más rendimiento
-                  color: widget.metric.color,
-                  barWidth: 2,
-                  isStrokeCapRound: true,
-                  dotData: const FlDotData(show: false), // Ocultar puntos individuales
-                  belowBarData: BarAreaData(
-                    show: true,
-                    gradient: LinearGradient(
-                      colors: [
-                        widget.metric.color.withOpacity(0.3),
-                        widget.metric.color.withOpacity(0.0),
-                      ],
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
+                    reservedSize: 40,
+                    getTitlesWidget: (value, meta) => Text(
+                        value.toInt().toString(),
+                        style: const TextStyle(color: Colors.white38, fontSize: 12, fontWeight: FontWeight.bold)
                     ),
                   ),
                 ),
-              ],
+              ),
+
+              minX: minX,
+              maxX: maxXDisplay,
+              minY: _currentMinY,
+              maxY: _currentMaxY,
+
+              // --- GENERACIÓN DE LÍNEAS CON GRADIENTE ---
+              lineBarsData: List.generate(_linesData.length, (index) {
+                // Obtenemos los puntos visibles
+                final visiblePoints = _linesData[index].getVisible(minX);
+
+                return LineChartBarData(
+                  spots: visiblePoints,
+
+                  // Estilo Sample 10:
+                  isCurved: false, // Sin curva para máximo rendimiento y precisión
+                  // Si quieres curva: isCurved: true, curveSmoothness: 0.1
+
+                  barWidth: 3, // Línea un poco más gruesa
+                  isStrokeCapRound: true,
+                  dotData: const FlDotData(show: false), // Sin puntos
+                  color: _lineColors[index % _lineColors.length],
+
+                  // EL GRADIENTE MÁGICO (Desvanecer cola)
+                  /*gradient: LinearGradient(
+                    colors: [
+                      color.withOpacity(0.0), // Transparente al inicio
+                      color.withOpacity(1.0), // Sólido al final (nuevo dato)
+                    ],
+                    // Ajustamos el gradiente para que cubra la ventana visible
+                    stops: const [0.0, 1.0],
+                  ),*/
+                );
+              }),
             ),
-            // Animación suave entre frames (opcional, poner en 0 para datos muy rápidos)
-            duration: const Duration(milliseconds: 0),
+            // Importante: Duración 0 porque nosotros animamos con el Ticker
+            duration: Duration.zero,
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildLegend() {
+    int count = labels.length;
+    if (count == 0) return const SizedBox.shrink();
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4.0),
+        child: Wrap(
+          spacing: 16.0,
+          runSpacing: 8.0,
+          alignment: WrapAlignment.center,
+          children: List.generate(count, (index) {
+            double val = index < _currentValues.length ? _currentValues[index] : 0;
+            Color color = _lineColors[index % _lineColors.length];
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Indicador de color sólido
+                Container(
+                  width: 10, height: 10,
+                  decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                    val.toStringAsFixed(1),
+                    style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 14)
+                ),
+                const SizedBox(width: 4),
+                Text(
+                    "${labels[index]} [${units[index]}]",
+                    style: const TextStyle(color: Colors.white54, fontSize: 12)
+                ),
+              ],
+            );
+          }),
+        ),
+      ),
     );
   }
 }

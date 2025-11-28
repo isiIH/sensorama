@@ -115,6 +115,8 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
   double? _stableMinY;
   double? _stableMaxY;
 
+  String _selectedSensor = "";
+
   @override
   void initState() {
     super.initState();
@@ -289,6 +291,8 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     List<LineChartBarData> allLines = [];
 
     for (var stream in _activeSensors.values) {
+      if (_selectedSensor != "" && _selectedSensor != stream.id) continue;
+
       for (int i = 0; i < stream.linesData.length; i++) {
         final visiblePoints = stream.linesData[i].getVisible(minX);
 
@@ -389,16 +393,27 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
         children: _activeSensors.values.map((stream) {
           // Mostrar la frecuencia original y el ratio aplicado
           String info = " | ${stream.sensorFrequencyHz}Hz | R:${stream.rawToVisualRatio}";
+          bool isSelected = _selectedSensor == stream.id;
 
           return Container(
             margin: const EdgeInsets.symmetric(horizontal: 8),
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.05),
+              color: Colors.white.withValues(alpha: isSelected ? 0.1 : 0),
               borderRadius: BorderRadius.circular(8),
               border: Border.all(color: Colors.white10),
             ),
-            child: Column(
+            child: TextButton(
+              onPressed: () {
+                setState(() {
+                  _selectedSensor = isSelected ? "" : stream.id;
+                });
+              },
+              style: ButtonStyle(
+                splashFactory: NoSplash.splashFactory, // Removes the splash effect
+                overlayColor: WidgetStateProperty.all(Colors.transparent), // Removes overlay color on press
+              ),
+              child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(stream.id + info, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 12)),
@@ -422,6 +437,7 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
                   }),
                 )
               ],
+            ),
             ),
           );
         }).toList(),

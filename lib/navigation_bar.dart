@@ -36,7 +36,7 @@ class _NavigationBarScreenState extends State<NavigationBarScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
       ),
-      body: _selectedIndex == 0 ? ConnectionScreen() : DashboardScreen(),
+      body: _selectedIndex == 0 ? ConnectionScreen() : RealTimeChart(),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _selectedIndex,
         onDestinationSelected: (int idx) {

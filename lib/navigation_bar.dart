@@ -11,7 +11,7 @@ class NavigationBarScreen extends StatefulWidget {
 }
 
 class _NavigationBarScreenState extends State<NavigationBarScreen> {
-  int _selectedIndex = 0; // 0 = Main (connection), 1 = Graph (dashboard)
+  int _selectedIndex = 1; // 0 = Main (connection), 1 = Graph (dashboard)
   late final TCPConn _sensorServer;
 
   @override

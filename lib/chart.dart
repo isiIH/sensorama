@@ -5,7 +5,11 @@ import 'package:intl/intl.dart';
 import 'tcp_conn.dart';
 import 'sensor_config.dart';
 
-// --- RING BUFFER ---
+// --- CONFIGURACIÓN DE VISUALIZACIÓN GLOBAL ---
+// Tasa de muestreo visual deseada para todos los gráficos (60 puntos/segundo).
+const int visualRateHz = 60;
+
+// --- RING BUFFER (Sin cambios) ---
 class RingBuffer {
   final List<FlSpot> buffer;
   int index = 0;
@@ -22,25 +26,60 @@ class RingBuffer {
 
   List<FlSpot> getVisible(double minX) {
     if (!filled && index == 0) return [];
-
     final ordered = !filled
         ? buffer.sublist(0, index)
         : [...buffer.sublist(index), ...buffer.sublist(0, index)];
 
     int firstIndex = ordered.indexWhere((p) => p.x >= minX);
-
     if (firstIndex == -1) {
-      if (ordered.isNotEmpty && ordered.last.x < minX) {
-        return [ordered.last];
-      }
+      if (ordered.isNotEmpty && ordered.last.x < minX) return [ordered.last];
       return [];
     }
-
-    // Punto Fantasma para suavizar la curva al entrar
     int startIndex = (firstIndex > 0) ? firstIndex - 1 : 0;
     return ordered.sublist(startIndex);
   }
 }
+
+// --- CLASE AUXILIAR PARA GESTIONAR CADA SENSOR INDIVIDUALMENTE ---
+class SensorStream {
+  final String id;
+  final List<String> labels;
+  final List<String> units;
+  final int sensorFrequencyHz; // Frecuencia real (antes 'freq'/'f')
+  final List<Color> colors;
+
+  // 🔑 Factor de downsampling: indica cuántos datos brutos se ignoran por cada dato que se grafica.
+  final int rawToVisualRatio;
+
+  // Datos visuales (RingBuffers)
+  final List<RingBuffer> linesData = [];
+  // Buffer de entrada pendiente
+  final List<List<FlSpot>> pendingBuffer = [];
+  // Valores actuales para la leyenda
+  final List<double> currentValues = [];
+
+  // Contador interno para el downsampling
+  int _counter = 0;
+
+  SensorStream({
+    required this.id,
+    required this.labels,
+    required this.units,
+    required this.sensorFrequencyHz,
+    required this.colors,
+  }) : rawToVisualRatio = (sensorFrequencyHz / visualRateHz * 2.5).ceil() {
+
+    // Capacidad: 10 segundos * Tasa de visualización deseada (60 Hz)
+    int capacity = (10 * visualRateHz * 1.5).ceil();
+
+    for (int i = 0; i < labels.length; i++) {
+      linesData.add(RingBuffer(capacity));
+      pendingBuffer.add([]);
+      currentValues.add(0.0);
+    }
+  }
+}
+
 
 class RealTimeChart extends StatefulWidget {
   const RealTimeChart({super.key});
@@ -51,46 +90,38 @@ class RealTimeChart extends StatefulWidget {
 
 class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProviderStateMixin {
   late final TCPConn _tcpConn;
+  late final Ticker _ticker;
 
-  // Visual Data (RingBuffers)
-  final List<RingBuffer> _linesData = [];
+  final Map<String, SensorStream> _activeSensors = {};
+  DateTime? _globalStartTime; // Tiempo 0 para todos los sensores
 
-  // Pending Buffer
-  final List<List<FlSpot>> _pendingDataBuffer = [];
+  // Renombrada: Ventana de tiempo mostrada en el eje X
+  final double _visualWindowSeconds = 3;
 
-  String nameSensor = "";
-  List<String> labels = [];
-  List<String> units = [];
-  int freq = 0;
-  final List<double> _currentValues = [];
-
-  DateTime? _startTime;
-
-  // Colores estilo Neon/Material
-  final List<Color> _lineColors = [
+  // Paleta global de colores
+  final List<Color> _palette = [
     Colors.cyanAccent, Colors.pinkAccent, Colors.amberAccent,
     Colors.greenAccent, Colors.purpleAccent, Colors.lightBlueAccent,
+    Colors.orangeAccent, Colors.tealAccent, Colors.redAccent,
+    Colors.indigoAccent, Colors.limeAccent, Colors.deepOrangeAccent
   ];
-
-  final double _windowDuration = 3; // Vista de ventana en segundos
-  final int _sampleRate = 200;
-  int _counter = 0;
+  int _colorIndex = 0;
 
   double _maxX = 0;
 
-  // Auto-scale
-  double _currentMinY = 0;
-  double _currentMaxY = 100;
+  // Auto-scale Y
+  double _currentMinY = -10;
+  double _currentMaxY = 10;
   double? _stableMinY;
   double? _stableMaxY;
 
   double _pointsToDrawAccumulator = 0.0;
-  late final Ticker _ticker;
 
   @override
   void initState() {
     super.initState();
     _tcpConn = TCPConn();
+    // 🔑 El listener ahora reacciona a los cambios de datos Y al estado de conexión
     _tcpConn.addListener(_onNewSensorData);
     _ticker = createTicker(_onTick);
     _ticker.start();
@@ -103,110 +134,129 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     super.dispose();
   }
 
+  // --- PROCESAMIENTO DE PAQUETES DE RED ---
   void _onNewSensorData() {
     if (_tcpConn.packets.isEmpty) return;
 
-    final SensorPacket lastPacket = _tcpConn.packets.last;
-    nameSensor = lastPacket.sensorId;
-    labels = lastPacket.labels;
-    units = lastPacket.units;
-    freq = lastPacket.f > 0 ? lastPacket.f : 0;
+    final SensorPacket packet = _tcpConn.packets.last;
 
-    int channels = lastPacket.data.first.values.length;
-    while (_pendingDataBuffer.length < channels) {
-      _pendingDataBuffer.add([]);
-      // Buffer circular de seguridad
-      int capacity = ((freq / _sampleRate) * 10).toInt();
-      _linesData.add(RingBuffer(capacity));
+    _globalStartTime ??= packet.data.first.timestamp;
+
+    if (!_activeSensors.containsKey(packet.sensorId)) {
+      _initializeNewSensor(packet);
     }
 
-    for (MetricData metricData in lastPacket.data) {
-      _counter++;
-      if(_counter % _sampleRate != 0) continue;
+    final stream = _activeSensors[packet.sensorId]!;
 
-      _startTime ??= metricData.timestamp;
+    for (MetricData metricData in packet.data) {
+      // 🔑 Lógica de downsampling PER-SENSOR
+      stream._counter++;
+      if (stream._counter % stream.rawToVisualRatio != 0) continue;
 
-      // Cálculo de X en SEGUNDOS (tiempo relativo)
+      // Resetear contador después de un ciclo (opcional, pero útil)
+      if (stream._counter >= stream.rawToVisualRatio) stream._counter = 0;
+
       final double x = metricData.timestamp
-          .difference(_startTime!)
+          .difference(_globalStartTime!)
           .inMicroseconds / 1000000.0;
 
       for (int i = 0; i < metricData.values.length; i++) {
-        if (i < _pendingDataBuffer.length) {
-          _pendingDataBuffer[i].add(FlSpot(x, metricData.values[i]));
+        if (i < stream.pendingBuffer.length) {
+          stream.pendingBuffer[i].add(FlSpot(x, metricData.values[i]));
         }
       }
     }
   }
 
+  void _initializeNewSensor(SensorPacket packet) {
+    List<Color> assignedColors = [];
+    for(int i=0; i<packet.labels.length; i++) {
+      assignedColors.add(_palette[_colorIndex % _palette.length]);
+      _colorIndex++;
+    }
+
+    _activeSensors[packet.sensorId] = SensorStream(
+      id: packet.sensorId,
+      labels: packet.labels,
+      units: packet.units,
+      sensorFrequencyHz: packet.f > 0 ? packet.f : 60,
+      colors: assignedColors,
+    );
+  }
+
+  // --- TICK DEL RELOJ DE ANIMACIÓN (MODIFICADO: VACIADO SUAVE) ---
   void _onTick(Duration elapsed) {
+    if (_activeSensors.isEmpty) return;
+
     bool hasChanges = false;
-    double realTimeRate = (freq / _sampleRate) / 60.0;
 
-    int bufferSize = _pendingDataBuffer.isNotEmpty ? _pendingDataBuffer[0].length : 0;
-    double multiplier = 1.0;
-    int oneSecondData = (freq / _sampleRate).round();
+    // Ya no usamos _pointsToDrawAccumulator basado en tiempo estricto.
+    // En su lugar, gestionamos el flujo basándonos en la "salud" del buffer.
 
-    if (bufferSize > oneSecondData * 1.5) {
-      multiplier = 1.2;
-    }
-    else if (bufferSize < (oneSecondData * 0.1)) {
-      multiplier = 0.9;
-    } else {
-      multiplier = 1.0;
-    }
+    for (var stream in _activeSensors.values) {
 
-      _pointsToDrawAccumulator += (realTimeRate * multiplier);
-      int pointsToExtract = _pointsToDrawAccumulator.floor();
+      // 1. Revisamos cuántos datos tiene pendientes este sensor (mirando el canal 0)
+      // Si no tiene datos, saltamos.
+      if (stream.pendingBuffer.isEmpty || stream.pendingBuffer[0].isEmpty) continue;
 
-      if (pointsToExtract > 0) {
-        _pointsToDrawAccumulator -= pointsToExtract;
+      int pendingCount = stream.pendingBuffer[0].length;
+      int pointsToMove = 1;
 
-        for (int i = 0; i < _pendingDataBuffer.length; i++) {
-          if (_pendingDataBuffer[i].isNotEmpty) {
-            hasChanges = true;
-            int count = _pendingDataBuffer[i].length < pointsToExtract
-                ? _pendingDataBuffer[i].length : pointsToExtract;
+      // 2. LÓGICA DE VELOCIDAD VARIABLE (La clave de la suavidad)
 
-            var points = _pendingDataBuffer[i].sublist(0, count);
-            _pendingDataBuffer[i].removeRange(0, count);
+      // 3. Mover los puntos del buffer pendiente al gráfico
+      for (int i = 0; i < stream.pendingBuffer.length; i++) {
+        var pending = stream.pendingBuffer[i];
 
-            for(var p in points) {
-              _linesData[i].add(p.x, p.y);
-            }
+        if (pending.isNotEmpty) {
+          hasChanges = true;
 
-            if (points.isNotEmpty) {
-              _maxX = points.last.x;
-              if (_currentValues.length <= i) _currentValues.add(0);
-              _currentValues[i] = points.last.y;
-            }
+          // Aseguramos no pedir más de lo que existe
+          int count = (pending.length < pointsToMove) ? pending.length : pointsToMove;
+
+          var points = pending.sublist(0, count);
+          pending.removeRange(0, count);
+
+          for (var p in points) {
+            stream.linesData[i].add(p.x, p.y);
+          }
+
+          if (points.isNotEmpty) {
+            // Actualizamos la X máxima para mover el gráfico
+            if (points.last.x > _maxX) _maxX = points.last.x;
+            // Valor actual para la leyenda
+            stream.currentValues[i] = points.last.y;
           }
         }
       }
+    }
 
-      if (hasChanges) {
-        setState(() {
-          _updateMinMax();
-        });
-      }
+    if (hasChanges) {
+      setState(() {
+        _updateGlobalMinMax();
+      });
+    }
   }
 
-  void _updateMinMax() {
+  // Escala automática basada en TODOS los sensores visibles
+  void _updateGlobalMinMax() {
     double min = double.infinity;
     double max = double.negativeInfinity;
     bool hasData = false;
 
-    // Calculamos ventana en segundos (ej. 3.0 segundos)
-    double visibleThreshold = _maxX - _windowDuration;
+    // Renombrada: Ventana de tiempo mostrada
+    double visibleThreshold = _maxX - _visualWindowSeconds;
 
-    for (var ring in _linesData) {
-      var line = ring.getVisible(visibleThreshold);
-      if (line.isNotEmpty) {
-        for (var spot in line) {
-          if (spot.x < visibleThreshold) continue;
-          hasData = true;
-          if (spot.y < min) min = spot.y;
-          if (spot.y > max) max = spot.y;
+    for (var stream in _activeSensors.values) {
+      for (var ring in stream.linesData) {
+        var line = ring.getVisible(visibleThreshold);
+        if (line.isNotEmpty) {
+          for (var spot in line) {
+            if (spot.x < visibleThreshold) continue;
+            hasData = true;
+            if (spot.y < min) min = spot.y;
+            if (spot.y > max) max = spot.y;
+          }
         }
       }
     }
@@ -214,24 +264,19 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     if (!hasData) return;
     if (min == max) { min -= 1; max += 1; }
 
-    const double stepSize = 10.0;
-    double targetMin = (min / stepSize).floor() * stepSize - stepSize;
-    double targetMax = (max / stepSize).ceil() * stepSize + stepSize;
+    // Padding vertical del 10%
+    double range = max - min;
+    double targetMin = min - (range * 0.1);
+    double targetMax = max + (range * 0.1);
 
-    if (_stableMaxY == null || _stableMinY == null) {
+    if (_stableMaxY == null) {
       _stableMaxY = targetMax;
       _stableMinY = targetMin;
-      _currentMinY = targetMin;
-      _currentMaxY = targetMax;
-      return;
+    } else {
+      // Lerp (suavizado)
+      _stableMaxY = _stableMaxY! + (targetMax - _stableMaxY!) * 0.1;
+      _stableMinY = _stableMinY! + (targetMin - _stableMinY!) * 0.1;
     }
-
-    // Lógica de histéresis suave
-    if (targetMax > _stableMaxY!) _stableMaxY = targetMax;
-    if (targetMin < _stableMinY!) _stableMinY = targetMin;
-
-    if (targetMax < _stableMaxY!) _stableMaxY = _stableMaxY! - (_stableMaxY! - targetMax) * 0.05;
-    if (targetMin > _stableMinY!) _stableMinY = _stableMinY! + (targetMin - _stableMinY!) * 0.05;
 
     _currentMinY = _stableMinY!;
     _currentMaxY = _stableMaxY!;
@@ -239,42 +284,47 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
 
   @override
   Widget build(BuildContext context) {
-    // Conversión de ventana a Segundos para el eje X
-    double minX = _maxX > _windowDuration ? _maxX - _windowDuration : 0;
-    double maxXDisplay = _maxX > _windowDuration ? _maxX : _windowDuration;
+    double minX = _maxX > _visualWindowSeconds ? _maxX - _visualWindowSeconds : 0;
+    double maxXDisplay = _maxX > _visualWindowSeconds ? _maxX : _visualWindowSeconds;
+
+    // Generar todas las líneas de todos los sensores
+    List<LineChartBarData> allLines = [];
+
+    for (var stream in _activeSensors.values) {
+      for (int i = 0; i < stream.linesData.length; i++) {
+        final visiblePoints = stream.linesData[i].getVisible(minX);
+
+        allLines.add(LineChartBarData(
+          spots: visiblePoints,
+          isCurved: false,
+          barWidth: 2,
+          color: stream.colors[i],
+          dotData: const FlDotData(show: false),
+        ));
+      }
+    }
 
     return Column(
       children: [
-        // Encabezado con datos actuales
-        Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(nameSensor.isEmpty ? "Esperando datos..." : "$nameSensor (${_linesData.length} ch)", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 18)),
-            const SizedBox(height: 4),
-            _buildLegend(),
-          ],
-        ),
-        const SizedBox(height: 12),
+        _buildMultiSensorLegend(),
+
+        const SizedBox(height: 10),
 
         // GRÁFICO
         Expanded(
           child: LineChart(
             LineChartData(
-              // --- ESTILO BASADO EN SAMPLE 10 ---
               lineTouchData: const LineTouchData(enabled: false),
-              clipData: const FlClipData.all(), // Recorta lo que sale del área
+              clipData: const FlClipData.all(),
               gridData: FlGridData(
                 show: true,
-                drawVerticalLine: false, // Más limpio sin líneas verticales
-                drawHorizontalLine: true,
+                drawVerticalLine: false,
                 getDrawingHorizontalLine: (value) => FlLine(
-                  color: Colors.white.withValues(alpha: 0.1),
-                  strokeWidth: 1,
+                  color: Colors.white10, strokeWidth: 1,
                 ),
               ),
-              borderData: FlBorderData(show: false), // Sin bordes duros
+              borderData: FlBorderData(show: false),
 
-              // Ejes
               titlesData: FlTitlesData(
                 show: true,
                 rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -283,12 +333,11 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
                   sideTitles: SideTitles(
                     showTitles: true,
                     reservedSize: 60,
-                    interval: 1, // Cada 1 segundo
+                    interval: 1,
                     getTitlesWidget: (value, meta) {
-                      // Formato de tiempo limpio
-                      if (_startTime == null) return const SizedBox.shrink();
-                      final date = _startTime!.add(Duration(milliseconds: (value * 1000).toInt()));
-                      return Padding(
+                      if (_globalStartTime == null) return const SizedBox.shrink();
+                      final date = _globalStartTime!.add(Duration(milliseconds: (value * 1000).toInt()));
+                      return  Padding(
                         padding: const EdgeInsets.only(top: 10),
                         child: RotatedBox(
                           quarterTurns: -1,
@@ -306,8 +355,8 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
                     showTitles: true,
                     reservedSize: 40,
                     getTitlesWidget: (value, meta) => Text(
-                        value.toInt().toString(),
-                        style: const TextStyle(color: Colors.white38, fontSize: 12, fontWeight: FontWeight.bold)
+                      value.toInt().toString(),
+                      style: const TextStyle(color: Colors.white38, fontSize: 10),
                     ),
                   ),
                 ),
@@ -318,36 +367,8 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
               minY: _currentMinY,
               maxY: _currentMaxY,
 
-              // --- GENERACIÓN DE LÍNEAS CON GRADIENTE ---
-              lineBarsData: List.generate(_linesData.length, (index) {
-                // Obtenemos los puntos visibles
-                final visiblePoints = _linesData[index].getVisible(minX);
-
-                return LineChartBarData(
-                  spots: visiblePoints,
-
-                  // Estilo Sample 10:
-                  isCurved: false, // Sin curva para máximo rendimiento y precisión
-                  // Si quieres curva: isCurved: true, curveSmoothness: 0.1
-
-                  barWidth: 3, // Línea un poco más gruesa
-                  isStrokeCapRound: true,
-                  dotData: const FlDotData(show: false), // Sin puntos
-                  color: _lineColors[index % _lineColors.length],
-
-                  // EL GRADIENTE MÁGICO (Desvanecer cola)
-                  /*gradient: LinearGradient(
-                    colors: [
-                      color.withOpacity(0.0), // Transparente al inicio
-                      color.withOpacity(1.0), // Sólido al final (nuevo dato)
-                    ],
-                    // Ajustamos el gradiente para que cubra la ventana visible
-                    stops: const [0.0, 1.0],
-                  ),*/
-                );
-              }),
+              lineBarsData: allLines,
             ),
-            // Importante: Duración 0 porque nosotros animamos con el Ticker
             duration: Duration.zero,
           ),
         ),
@@ -355,41 +376,54 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     );
   }
 
-  Widget _buildLegend() {
-    int count = labels.length;
-    if (count == 0) return const SizedBox.shrink();
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4.0),
-        child: Wrap(
-          spacing: 16.0,
-          runSpacing: 8.0,
-          alignment: WrapAlignment.center,
-          children: List.generate(count, (index) {
-            double val = index < _currentValues.length ? _currentValues[index] : 0;
-            Color color = _lineColors[index % _lineColors.length];
-            return Row(
-              mainAxisSize: MainAxisSize.min,
+  Widget _buildMultiSensorLegend() {
+    if (_activeSensors.isEmpty) {
+      return const Text("Esperando conexión...", style: TextStyle(color: Colors.white54));
+    }
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: _activeSensors.values.map((stream) {
+          // Mostrar la frecuencia original y el ratio aplicado
+          String info = " | ${stream.sensorFrequencyHz}Hz | R:${stream.rawToVisualRatio}";
+
+          return Container(
+            margin: const EdgeInsets.symmetric(horizontal: 8),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Indicador de color sólido
-                Container(
-                  width: 10, height: 10,
-                  decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                    val.toStringAsFixed(1),
-                    style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 14)
-                ),
-                const SizedBox(width: 4),
-                Text(
-                    "${labels[index]} [${units[index]}]",
-                    style: const TextStyle(color: Colors.white54, fontSize: 12)
-                ),
+                Text(stream.id + info, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 12)),
+                const SizedBox(height: 4),
+                Row(
+                  children: List.generate(stream.labels.length, (index) {
+                    final val = stream.currentValues[index];
+                    final color = stream.colors[index];
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 12.0),
+                      child: Row(
+                        children: [
+                          Container(width: 8, height: 8, color: color),
+                          const SizedBox(width: 4),
+                          Text("${stream.labels[index]}: ${val.toStringAsFixed(1)}",
+                              style: TextStyle(color: color, fontSize: 11)
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+                )
               ],
-            );
-          }),
-        ),
+            ),
+          );
+        }).toList(),
       ),
     );
   }

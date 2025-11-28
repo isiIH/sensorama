@@ -43,8 +43,7 @@ class RingBuffer {
 }
 
 class RealTimeChart extends StatefulWidget {
-  final bool isPaused;
-  const RealTimeChart({super.key, required this.isPaused});
+  const RealTimeChart({super.key});
 
   @override
   State<RealTimeChart> createState() => _RealTimeChartState();
@@ -105,7 +104,7 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
   }
 
   void _onNewSensorData() {
-    if (widget.isPaused || _tcpConn.packets.isEmpty) return;
+    if (_tcpConn.packets.isEmpty) return;
 
     final SensorPacket lastPacket = _tcpConn.packets.last;
     nameSensor = lastPacket.sensorId;

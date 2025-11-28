@@ -1,5 +1,5 @@
-import 'package:flutter/material.dart';
-import 'dashboard.dart';
+import 'package:flutter/material.dart' hide NavigationBar;
+import 'navigation_bar.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ class MainApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF101418), brightness: Brightness.dark),
         scaffoldBackgroundColor: const Color(0xFF101418),
       ),
-      home: const DashboardScreen(),
+      home: const NavigationBarScreen(),
     );
   }
 }

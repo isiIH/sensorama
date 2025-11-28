@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'sensor_config.dart';
 import 'chart.dart';
-import 'tcp_conn.dart';
 
 // Configuración estática de los sensores
 final List<SensorConfig> availableSensors = [
@@ -34,46 +33,25 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   late SensorConfig _selectedSensor;
   late MetricConfig _selectedMetric;
-  bool _isStreaming = true; // Controlar pausar/reanudar
-  late final TCPConn _sensorServer;
 
   @override
   void initState() {
     super.initState();
     _selectedSensor = availableSensors[0];
     _selectedMetric = _selectedSensor.metrics[0];
-    _sensorServer = TCPConn();
-    _sensorServer.start();
   }
 
   @override
   void dispose() {
     // TODO: implement dispose
     super.dispose();
-    _sensorServer.stop();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("Sensorama"),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        actions: [
-          IconButton(
-            icon: Icon(_isStreaming ? Icons.pause_circle_filled : Icons.play_circle_fill),
-            color: _isStreaming ? Colors.yellow : Colors.green,
-            iconSize: 32,
-            onPressed: () {
-              setState(() {
-                _isStreaming = !_isStreaming;
-              });
-            },
-          )
-        ],
-      ),
-      body: Column(
+    return Padding(
+      padding: const EdgeInsets.all(0.0),
+      child: Column(
         children: [
           // SELECCIÓN DE SENSOR
           SizedBox(
@@ -126,7 +104,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         _selectedMetric = metric;
                       });
                     },
-                    selectedColor: metric.color.withOpacity(0.8),
+                    selectedColor: metric.color.withValues(alpha: 0.8),
                     backgroundColor: Colors.white10,
                     labelStyle: TextStyle(
                       color: isSelected ? Colors.white : Colors.grey,
@@ -152,9 +130,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 borderRadius: BorderRadius.circular(24),
                 border: Border.all(color: Colors.white10),
               ),
-              child: RealTimeChart(
-                isPaused: !_isStreaming,
-              ),
+              child: RealTimeChart(),
             ),
           ),
 

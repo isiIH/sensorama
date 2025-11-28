@@ -269,7 +269,7 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
                 drawVerticalLine: false, // Más limpio sin líneas verticales
                 drawHorizontalLine: true,
                 getDrawingHorizontalLine: (value) => FlLine(
-                  color: Colors.white.withOpacity(0.1),
+                  color: Colors.white.withValues(alpha: 0.1),
                   strokeWidth: 1,
                 ),
               ),

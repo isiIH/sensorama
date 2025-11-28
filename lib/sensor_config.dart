@@ -37,10 +37,10 @@ class SensorPacket {
 
     List<MetricData> data = [];
     for(var i=0; i<bufferSize; i++) {
-      var dataBlock = json['data'][i];
+      List<dynamic> dataBlock = json['data'][i];
       data.add(MetricData(
-          values: List<double>.from(dataBlock['metrics']),
-          timestamp: DateTime.parse(dataBlock['timestamp'])
+          values: List<double>.from(dataBlock[0]),
+          timestamp: DateTime.fromMicrosecondsSinceEpoch(dataBlock[1])
       ));
     }
 

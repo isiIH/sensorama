@@ -77,11 +77,11 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   // Definición de UUIDs coincidentes con el ESP32
-  final Guid SERVICE_UUID = Guid("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
-  final Guid CHAR_SSID_UUID = Guid("beb5483e-36e1-4688-b7f5-ea07361b26a8");
-  final Guid CHAR_PASS_UUID = Guid("82141505-1a35-463d-9d7a-1808d4b005c3");
-  final Guid CHAR_CONFIG_UUID = Guid("e4b60b73-0456-4c4f-bc14-22280d507116");
-  final Guid CHAR_ACTION_UUID = Guid("69c2794c-8594-4b53-b093-a61574697960");
+  final Guid serviceUUID = Guid("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+  final Guid charSSIDUUID = Guid("beb5483e-36e1-4688-b7f5-ea07361b26a8");
+  final Guid charPassUUID = Guid("82141505-1a35-463d-9d7a-1808d4b005c3");
+  final Guid charConfigUUID = Guid("e4b60b73-0456-4c4f-bc14-22280d507116");
+  final Guid charActionUUID = Guid("69c2794c-8594-4b53-b093-a61574697960");
 
   Future<void> _provisionDevice(BluetoothDevice device, String ssid,
       String password, String host, int port) async {
@@ -109,7 +109,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       // Buscar nuestro servicio custom
       BluetoothService? targetService;
       try {
-        targetService = services.firstWhere((s) => s.uuid == SERVICE_UUID);
+        targetService = services.firstWhere((s) => s.uuid == serviceUUID);
       } catch (e) {
         throw Exception(
             "Service not found. Is the ESP32 flashing the correct code?");
@@ -121,10 +121,10 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       }
 
       // 4. Escribir Datos
-      final ssidChar = getChar(CHAR_SSID_UUID);
-      final passChar = getChar(CHAR_PASS_UUID);
-      final configChar = getChar(CHAR_CONFIG_UUID); // Host:Port
-      final actionChar = getChar(CHAR_ACTION_UUID);
+      final ssidChar = getChar(charSSIDUUID);
+      final passChar = getChar(charPassUUID);
+      final configChar = getChar(charConfigUUID); // Host:Port
+      final actionChar = getChar(charActionUUID);
 
       // Escribir SSID
       print("Writing SSID...");
@@ -148,7 +148,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
               content: Text(
-                  'Configuration sent to ${device.name}! Device is rebooting/connecting.')),
+                  'Configuration sent to ${device.platformName}! Device is rebooting/connecting.')),
         );
       }
     } catch (e) {

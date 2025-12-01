@@ -1,94 +1,79 @@
 name: "Build"
 
 on:
-  pull_request:
+  push:
     branches:
       - main
-  push:
+  pull_request:
     branches:
       - main
 
 permissions:
   contents: write
 
-jobs:  
-  build:      
-    name: Build & Release 
+jobs:
+  build:
+    name: Build & Release
     runs-on: ubuntu-latest
-
+    
     steps:
-        # Checkout Repository
+      # 1. Checkout (Actualizado a v4)
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-        # Setup Java
+      # 2. Setup Java con Caché de Gradle
       - name: Set Up Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: 'gradle'
 
-        # Setup Flutter
+      # 3. Setup Flutter con Caché
       - name: Set Up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.38.3'
           channel: 'stable'
+          cache: true 
 
-        # Install Dependencies
+      # 4. Install Dependencies
       - name: Install Dependencies
         run: flutter pub get
 
-        # Create .env file
+      # 5. Create .env file
       - name: Create .env file
         run: echo "${{ secrets.ENV_FILE }}" > .env
-        
-        # Building APK
+      
+      # 6. Build APK y AAB
       - name: Build APK
         run: flutter build apk --release
 
-        # Building App Bundle (aab)
-      - name: Build appBundle
+      - name: Build App Bundle
         run: flutter build appbundle
 
-        # Upload Artifacts
+      # 7. Upload Artifacts (Solo subir, no release todavía)
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Releases
+          name: Build-Output
           path: |
             build/app/outputs/flutter-apk/app-release.apk
             build/app/outputs/bundle/release/app-release.aab
 
-        # Extract Version
+      # --- LÓGICA DE VERSIONADO ---
       - name: Extract version from pubspec.yaml
         id: extract_version
         run: |
           version=$(grep '^version: ' pubspec.yaml | cut -d ' ' -f 2 | tr -d '\r')
           echo "VERSION=$version" >> $GITHUB_ENV
 
-        # Check if Tag Exists
-      - name: Check if Tag Exists
-        id: check_tag
-        run: |
-          if git rev-parse "v${{ env.VERSION }}" >/dev/null 2>&1; then
-            echo "TAG_EXISTS=true" >> $GITHUB_ENV
-          else
-            echo "TAG_EXISTS=false" >> $GITHUB_ENV
-          fi
-
-        # Modify Tag if it Exists
-      - name: Modify Tag
-        if: env.TAG_EXISTS == 'true'
-        id: modify_tag
-        run: |
-          new_version="${{ env.VERSION }}-build-${{ github.run_number }}"
-          echo "VERSION=$new_version" >> $GITHUB_ENV
-        
-        # Create Release
+      # --- CREACIÓN DE RELEASE (Solo en Push a Main) ---
       - name: Create Release
+        if: github.event_name == 'push'
         uses: ncipollo/release-action@v1
         with:
           artifacts: "build/app/outputs/flutter-apk/app-release.apk,build/app/outputs/bundle/release/app-release.aab"
-          tag: v${{ github.run_number }}
+          tag: v${{ env.VERSION }}-build-${{ github.run_number }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true # Permite actualizar si el tag ya existe

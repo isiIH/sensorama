@@ -14,37 +14,41 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-        #1 Checkout Repository
+        # Checkout Repository
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-        #2 Setup Java
+        # Setup Java
       - name: Set Up Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-        #3 Setup Flutter
+        # Setup Flutter
       - name: Set Up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.38.3'
           channel: 'stable'
 
-        #4 Install Dependencies
+        # Install Dependencies
       - name: Install Dependencies
         run: flutter pub get
+
+        # Create .env file
+      - name: Create .env file
+        run: echo "${{ secrets.ENV_FILE }}" > .env
         
-       #6 Building APK
+        # Building APK
       - name: Build APK
         run: flutter build apk --release
 
-        #7 Building App Bundle (aab)
+        # Building App Bundle (aab)
       - name: Build appBundle
         run: flutter build appbundle
 
-        #9 Upload Artifacts
+        # Upload Artifacts
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -53,14 +57,14 @@ jobs:
             build/app/outputs/flutter-apk/app-release.apk
             build/app/outputs/bundle/release/app-release.aab
 
-        #10 Extract Version
+        # Extract Version
       - name: Extract version from pubspec.yaml
         id: extract_version
         run: |
           version=$(grep '^version: ' pubspec.yaml | cut -d ' ' -f 2 | tr -d '\r')
           echo "VERSION=$version" >> $GITHUB_ENV
 
-        #11 Check if Tag Exists
+        # Check if Tag Exists
       - name: Check if Tag Exists
         id: check_tag
         run: |
@@ -70,7 +74,7 @@ jobs:
             echo "TAG_EXISTS=false" >> $GITHUB_ENV
           fi
 
-        #12 Modify Tag if it Exists
+        # Modify Tag if it Exists
       - name: Modify Tag
         if: env.TAG_EXISTS == 'true'
         id: modify_tag
@@ -78,7 +82,7 @@ jobs:
           new_version="${{ env.VERSION }}-build-${{ github.run_number }}"
           echo "VERSION=$new_version" >> $GITHUB_ENV
         
-        #13 Create Release
+        # Create Release
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:

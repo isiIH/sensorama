@@ -45,7 +45,7 @@ class SensorStream {
   final String id;
   final List<String> labels;
   final List<String> units;
-  final int sensorFrequencyHz; // Frecuencia real (antes 'freq'/'f')
+  final int sensorFrequencyHz; // Frecuencia del sensor
   final List<Color> colors;
 
   // 🔑 Factor de downsampling: indica cuántos datos brutos se ignoran por cada dato que se grafica.

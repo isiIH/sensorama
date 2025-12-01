@@ -127,21 +127,17 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       final actionChar = getChar(charActionUUID);
 
       // Escribir SSID
-      print("Writing SSID...");
       await ssidChar.write(utf8.encode(ssid), withoutResponse: false);
 
       // Escribir Password
-      print("Writing Password...");
       await passChar.write(utf8.encode(password), withoutResponse: false);
 
       // Escribir Configuración (Host:Port)
       // Combinamos host y port en un solo string para enviarlo fácil
       String configString = "$host:$port";
-      print("Writing Config: $configString");
       await configChar.write(utf8.encode(configString), withoutResponse: false);
 
       // 5. Enviar comando de acción para guardar y conectar
-      print("Sending Save Command...");
       await actionChar.write(utf8.encode("SAVE"), withoutResponse: false);
 
       if (mounted) {
@@ -152,7 +148,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         );
       }
     } catch (e) {
-      print('Provisioning Error: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error: ${e.toString()}')),

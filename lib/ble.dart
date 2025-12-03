@@ -408,28 +408,44 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     if (devices.isEmpty) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Provisioning ${devices.length} devices...')),
+      SnackBar(content: Text('Provisioning ${devices.length} devices in parallel...')),
     );
 
-    for (var i = 0; i < devices.length; i++) {
-      final dev = devices[i];
+    // Helper for per-device provisioning with timeout and error capture
+    Future<Map<String, dynamic>> _provisionOne(BluetoothDevice dev) async {
       try {
-        // Provision each device one by one
-        await _provisionDevice(dev, ssid, password, host, port);
+        await _provisionDevice(dev, ssid, password, host, port)
+            .timeout(const Duration(seconds: 30));
+        return {'id': dev.remoteId.str, 'name': dev.platformName, 'success': true};
       } catch (e) {
-        // show error for this device but continue with others
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error provisioning ${dev.platformName}: $e')),
-          );
-        }
+        return {'id': dev.remoteId.str, 'name': dev.platformName, 'success': false, 'error': e.toString()};
       }
     }
 
+    // Run all in parallel
+    final results = await Future.wait(devices.map(_provisionOne));
+
+    // Aggregate results
+    final failed = results.where((r) => r['success'] == false).toList();
+    final succeeded = results.where((r) => r['success'] == true).toList();
+
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Provisioning completed'), backgroundColor: Colors.green),
-      );
+      if (succeeded.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Provisioned ${succeeded.length} devices successfully.'), backgroundColor: Colors.green),
+        );
+      }
+      if (failed.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to provision ${failed.length} devices.'), backgroundColor: Colors.red),
+        );
+        // Optionally, show details for each failed device
+        for (var r in failed) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Device ${r['name']} error: ${r['error']}'), backgroundColor: Colors.red),
+          );
+        }
+      }
       // Clear selection and exit selection mode
       setState(() {
         _selectedIds.clear();

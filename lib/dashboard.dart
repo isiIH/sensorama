@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/scheduler.dart';
@@ -48,8 +50,11 @@ class SensorStream {
   final int sensorFrequencyHz; // Frecuencia del sensor
   final List<Color> colors;
 
-  // 🔑 Factor de downsampling: indica cuántos datos brutos se ignoran por cada dato que se grafica.
+  // Factor de downsampling: indica cuántos datos brutos se ignoran por cada dato que se grafica.
   final int rawToVisualRatio;
+  // Acumulador para la interpolación de velocidad
+  double drawAccumulator = 0.0;
+  final int pointsInWindow = (visualRateHz / 2.5).ceil();
 
   // Datos visuales (RingBuffers)
   final List<RingBuffer> linesData = [];
@@ -67,7 +72,7 @@ class SensorStream {
     required this.units,
     required this.sensorFrequencyHz,
     required this.colors,
-  }) : rawToVisualRatio = (sensorFrequencyHz / visualRateHz * 2.5).ceil() {
+  }) : rawToVisualRatio = (sensorFrequencyHz / visualRateHz * 2.5).ceil() { // (visualRateHz / 2.5) puntos en pantalla
 
     // Capacidad: 10 segundos * Tasa de visualización deseada (60 Hz)
     int capacity = (10 * visualRateHz * 1.5).ceil();
@@ -190,42 +195,68 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
 
     bool hasChanges = false;
 
-    // Ya no usamos _pointsToDrawAccumulator basado en tiempo estricto.
-    // En su lugar, gestionamos el flujo basándonos en la "salud" del buffer.
+    // CONFIGURACIÓN DE LA INTERPOLACIÓN
+    // Cuántos puntos queremos tener idealmente en espera (buffer de seguridad)
+    // 5 frames a 60Hz son ~83ms de latencia, imperceptible pero suaviza mucho.
+    const int targetBufferSize = 15;
+
+    // Factor de agresividad: qué tan rápido aceleramos si nos quedamos atrás.
+    // 0.1 significa que corregimos el 10% del error por frame.
+    const double correctionFactor = 0.1;
 
     for (var stream in _activeSensors.values) {
-
-      // 1. Revisamos cuántos datos tiene pendientes este sensor (mirando el canal 0)
-      // Si no tiene datos, saltamos.
       if (stream.pendingBuffer.isEmpty || stream.pendingBuffer[0].isEmpty) continue;
 
-      //int pendingCount = stream.pendingBuffer[0].length;
-      int pointsToMove = 1;
+      // 1. Calcular cuántos puntos tenemos en espera (del primer canal)
+      int pendingCount = stream.pendingBuffer[0].length;
 
-      // 2. LÓGICA DE VELOCIDAD VARIABLE (La clave de la suavidad)
+      // 2. CALCULAR VELOCIDAD DE DIBUJO (Speed)
+      // Velocidad base = 1.0 (1 punto por frame, sincronizado con visualRateHz)
+      double speed = 1.0;
 
-      // 3. Mover los puntos del buffer pendiente al gráfico
-      for (int i = 0; i < stream.pendingBuffer.length; i++) {
-        var pending = stream.pendingBuffer[i];
+      if (pendingCount > targetBufferSize) {
+        // Estamos retrasados: Aceleramos proporcionalmente al error
+        // Ejemplo: Si hay 20 pendientes, (20 - 5) * 0.1 = 1.5 -> Speed = 2.5
+        // Esto vacía el buffer suavemente sin saltos bruscos.
+        speed += (pendingCount - targetBufferSize) * correctionFactor;
+      } else if (pendingCount < targetBufferSize) {
+        speed -= (targetBufferSize - pendingCount) * correctionFactor; // speed será < 1.0
 
-        if (pending.isNotEmpty) {
-          hasChanges = true;
+        // Limitamos la velocidad mínima para asegurar que el gráfico siga moviéndose lentamente.
+        speed = math.max(0.01, speed);
+      }
 
-          // Aseguramos no pedir más de lo que existe
-          int count = (pending.length < pointsToMove) ? pending.length : pointsToMove;
+      // 3. Acumular la velocidad
+      stream.drawAccumulator += speed;
 
-          var points = pending.sublist(0, count);
-          pending.removeRange(0, count);
+      // 4. Determinar cuántos puntos enteros podemos mover ahora
+      int pointsToMove = stream.drawAccumulator.floor();
 
-          for (var p in points) {
+      if (pointsToMove > 0) {
+        // Restamos los enteros usados, guardamos el decimal para el siguiente frame
+        stream.drawAccumulator -= pointsToMove;
+
+        // Limitamos para no tratar de sacar más de lo que existe
+        if (pointsToMove > pendingCount) pointsToMove = pendingCount;
+
+        hasChanges = true;
+
+        // 5. Mover los puntos del buffer pendiente al buffer visual
+        for (int i = 0; i < stream.pendingBuffer.length; i++) {
+          var pending = stream.pendingBuffer[i];
+
+          // Extraer el lote calculado
+          var pointsChunk = pending.sublist(0, pointsToMove);
+          pending.removeRange(0, pointsToMove);
+
+          // Añadir al gráfico
+          for (var p in pointsChunk) {
             stream.linesData[i].add(p.x, p.y);
           }
 
-          if (points.isNotEmpty) {
-            // Actualizamos la X máxima para mover el gráfico
-            if (points.last.x > _maxX) _maxX = points.last.x;
-            // Valor actual para la leyenda
-            stream.currentValues[i] = points.last.y;
+          if (pointsChunk.isNotEmpty) {
+            if (pointsChunk.last.x > _maxX) _maxX = pointsChunk.last.x;
+            stream.currentValues[i] = pointsChunk.last.y;
           }
         }
       }
@@ -298,7 +329,6 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
 
         allLines.add(LineChartBarData(
           spots: visiblePoints,
-          isCurved: false,
           barWidth: 2,
           color: stream.colors[i],
           dotData: const FlDotData(show: false),
@@ -309,75 +339,75 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
-      children: [
-        _buildMultiSensorLegend(),
+        children: [
+          _buildMultiSensorLegend(),
 
-        const SizedBox(height: 10),
+          const SizedBox(height: 10),
 
-        // GRÁFICO
-        Expanded(
-          child: LineChart(
-            LineChartData(
-              lineTouchData: const LineTouchData(enabled: false),
-              clipData: const FlClipData.all(),
-              gridData: FlGridData(
-                show: true,
-                drawVerticalLine: false,
-                getDrawingHorizontalLine: (value) => FlLine(
-                  color: Colors.white10, strokeWidth: 1,
-                ),
-              ),
-              borderData: FlBorderData(show: false),
-
-              titlesData: FlTitlesData(
-                show: true,
-                rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                bottomTitles: AxisTitles(
-                  sideTitles: SideTitles(
-                    showTitles: true,
-                    reservedSize: 60,
-                    interval: 1,
-                    getTitlesWidget: (value, meta) {
-                      if (_globalStartTime == null) return const SizedBox.shrink();
-                      final date = _globalStartTime!.add(Duration(milliseconds: (value * 1000).toInt()));
-                      return  Padding(
-                        padding: const EdgeInsets.only(top: 10),
-                        child: RotatedBox(
-                          quarterTurns: -1,
-                          child: Text(
-                            DateFormat('HH:mm:ss').format(date),
-                            style: const TextStyle(color: Colors.grey, fontSize: 10),
-                          ),
-                        ),
-                      );
-                    },
+          // GRÁFICO
+          Expanded(
+            child: LineChart(
+              LineChartData(
+                lineTouchData: const LineTouchData(enabled: false),
+                clipData: const FlClipData.all(),
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (value) => FlLine(
+                    color: Colors.white10, strokeWidth: 1,
                   ),
                 ),
-                leftTitles: AxisTitles(
-                  sideTitles: SideTitles(
-                    showTitles: true,
-                    reservedSize: 40,
-                    getTitlesWidget: (value, meta) => Text(
-                      value.toInt().toString(),
-                      style: const TextStyle(color: Colors.white38, fontSize: 10),
+                borderData: FlBorderData(show: false),
+
+                titlesData: FlTitlesData(
+                  show: true,
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 60,
+                      interval: 1,
+                      getTitlesWidget: (value, meta) {
+                        if (_globalStartTime == null) return const SizedBox.shrink();
+                        final date = _globalStartTime!.add(Duration(milliseconds: (value * 1000).toInt()));
+                        return  Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: RotatedBox(
+                            quarterTurns: -1,
+                            child: Text(
+                              DateFormat('HH:mm:ss').format(date),
+                              style: const TextStyle(color: Colors.grey, fontSize: 10),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 40,
+                      getTitlesWidget: (value, meta) => Text(
+                        value.toInt().toString(),
+                        style: const TextStyle(color: Colors.white38, fontSize: 10),
+                      ),
                     ),
                   ),
                 ),
+
+                minX: minX,
+                maxX: maxXDisplay,
+                minY: _currentMinY,
+                maxY: _currentMaxY,
+
+                lineBarsData: allLines,
               ),
-
-              minX: minX,
-              maxX: maxXDisplay,
-              minY: _currentMinY,
-              maxY: _currentMaxY,
-
-              lineBarsData: allLines,
+              duration: Duration.zero,
             ),
-            duration: Duration.zero,
           ),
-        ),
-      ],
-        ),
+        ],
+      ),
     );
   }
 
@@ -414,30 +444,30 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
                 overlayColor: WidgetStateProperty.all(Colors.transparent), // Removes overlay color on press
               ),
               child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(stream.id + info, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 12)),
-                const SizedBox(height: 4),
-                Row(
-                  children: List.generate(stream.labels.length, (index) {
-                    final val = stream.currentValues[index];
-                    final color = stream.colors[index];
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 12.0),
-                      child: Row(
-                        children: [
-                          Container(width: 8, height: 8, color: color),
-                          const SizedBox(width: 4),
-                          Text("${stream.labels[index]}: ${val.toStringAsFixed(1)}",
-                              style: TextStyle(color: color, fontSize: 11)
-                          ),
-                        ],
-                      ),
-                    );
-                  }),
-                )
-              ],
-            ),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(stream.id + info, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 12)),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: List.generate(stream.labels.length, (index) {
+                      final val = stream.currentValues[index];
+                      final color = stream.colors[index];
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 12.0),
+                        child: Row(
+                          children: [
+                            Container(width: 8, height: 8, color: color),
+                            const SizedBox(width: 4),
+                            Text("${stream.labels[index]}: ${val.toStringAsFixed(1)}",
+                                style: TextStyle(color: color, fontSize: 11)
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                  )
+                ],
+              ),
             ),
           );
         }).toList(),

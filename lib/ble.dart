@@ -6,10 +6,8 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'tcp_conn.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-
-// ---------------------------------------------------------------------------
-// CONNECTION SCREEN
-// ---------------------------------------------------------------------------
+import 'package:network_info_plus/network_info_plus.dart';
+import 'package:connectivity_plus/connectivity_plus.dart'; // IMPORTANTE: Agregar este paquete
 
 class ConnectionScreen extends StatefulWidget {
   const ConnectionScreen({super.key});
@@ -19,224 +17,305 @@ class ConnectionScreen extends StatefulWidget {
 }
 
 class _ConnectionScreenState extends State<ConnectionScreen> {
+  // --- Estado de Red ---
   String? _localIp;
-  final List<BluetoothDevice> _devices = [];
-  StreamSubscription<List<ScanResult>>? _scanSub;
-  bool _permissionsGranted = false;
+  String? _wifiName;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   final int _port = int.parse(dotenv.env['PORT']!);
 
-  @override
-  void initState() {
-    super.initState();
-    _loadLocalIp();
-    _requestPermissions();
-  }
+  // --- Estado de Bluetooth ---
+  final List<BluetoothDevice> _devices = [];
+  final List<String> _connectedDevices = []; // Lista visual (mock o futura implementación)
+  StreamSubscription<List<ScanResult>>? _scanSub;
+  bool _permissionsGranted = false;
 
-  @override
-  void dispose() {
-    _scanSub?.cancel();
-    FlutterBluePlus.stopScan();
-    super.dispose();
-  }
+  // --- UI ---
+  bool _passwordVisible = false;
 
-  Future<void> _loadLocalIp() async {
-    final ip = await getLocalIpAddress();
-    setState(() {
-      _localIp = ip;
-    });
-  }
-
-  Future<void> _requestPermissions() async {
-    final Map<Permission, PermissionStatus> statuses = await [
-      Permission.bluetooth,
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      Permission.location,
-    ].request();
-
-    final allGranted =
-    statuses.values.every((status) => status.isGranted || status.isDenied);
-
-    if (mounted) {
-      setState(() {
-        _permissionsGranted = allGranted;
-      });
-    }
-
-    if (allGranted) {
-      _startScan();
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text(
-                  'Bluetooth and location permissions are required for scanning devices.')),
-        );
-      }
-    }
-  }
-
-  // Definición de UUIDs coincidentes con el ESP32
+  // --- UUIDs ESP32 ---
   final Guid serviceUUID = Guid("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
   final Guid charSSIDUUID = Guid("beb5483e-36e1-4688-b7f5-ea07361b26a8");
   final Guid charPassUUID = Guid("82141505-1a35-463d-9d7a-1808d4b005c3");
   final Guid charConfigUUID = Guid("e4b60b73-0456-4c4f-bc14-22280d507116");
   final Guid charActionUUID = Guid("69c2794c-8594-4b53-b093-a61574697960");
 
-  Future<void> _provisionDevice(BluetoothDevice device, String ssid,
-      String password, String host, int port) async {
-    if (!mounted) return;
-    bool connected = false;
+  @override
+  void initState() {
+    super.initState();
+    _requestPermissions();
+    _initNetworkListener(); // Iniciar escucha de red
+    _startScan();
+  }
 
-    try {
-      // 1. Mostrar feedback de carga
+  @override
+  void dispose() {
+    _scanSub?.cancel();
+    _connectivitySub?.cancel(); // Cancelar escucha de red
+    FlutterBluePlus.stopScan();
+    super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // GESTIÓN DE RED (IP y WIFI)
+  // ---------------------------------------------------------------------------
+
+  void _initNetworkListener() {
+    // Escucha cambios en la conectividad (WiFi <-> Datos <-> Nada)
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
+      _updateNetworkInfo();
+    });
+
+    // Carga inicial
+    _updateNetworkInfo();
+  }
+
+  Future<void> _updateNetworkInfo() async {
+    final info = NetworkInfo();
+    String? wifiName = await info.getWifiName();
+    String? ip = await info.getWifiIP(); // Usamos network_info_plus para la IP WiFi específicamente
+
+    // Si network_info falla o estamos en datos, intentamos el método genérico
+    ip ??= await getLocalIpAddress();
+
+    if (wifiName != null) {
+      // Limpieza de comillas que devuelve iOS/Android a veces
+      if (wifiName.startsWith('"') && wifiName.endsWith('"')) {
+        wifiName = wifiName.substring(1, wifiName.length - 1);
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _localIp = ip;
+        _wifiName = wifiName;
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // GESTIÓN DE PERMISOS Y BLUETOOTH
+  // ---------------------------------------------------------------------------
+
+  Future<void> _requestPermissions() async {
+    final Map<Permission, PermissionStatus> statuses = await [
+      Permission.bluetooth,
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.location, // Necesario para obtener SSID en Android
+    ].request();
+
+    final allGranted = statuses.values.every((status) => status.isGranted || status.isDenied); // Lógica permisiva
+
+    if (mounted) {
+      setState(() {
+        _permissionsGranted = allGranted;
+      });
+
+      // Si tenemos permisos, actualizamos la info de red (el SSID requiere Location)
+      if (allGranted) _updateNetworkInfo();
+    }
+
+    if (!allGranted && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Connecting to device...')),
+        const SnackBar(content: Text('Permissions are required for scanning and Wifi info.')),
       );
-
-      // 2. Conectar (Desactivar autoConnect para forzar conexión inmediata)
-      await device.connect(license: License.free, autoConnect: false);
-      connected = true;
-
-      // Solicitar MTU más alto para enviar strings largos más rápido (opcional pero recomendado)
-      if (Platform.isAndroid) {
-        await device.requestMtu(512);
-      }
-
-      // 3. Descubrir Servicios
-      List<BluetoothService> services = await device.discoverServices();
-
-      // Buscar nuestro servicio custom
-      BluetoothService? targetService;
-      try {
-        targetService = services.firstWhere((s) => s.uuid == serviceUUID);
-      } catch (e) {
-        throw Exception(
-            "Service not found. Is the ESP32 flashing the correct code?");
-      }
-
-      // Helper para buscar características dentro del servicio
-      BluetoothCharacteristic getChar(Guid uuid) {
-        return targetService!.characteristics.firstWhere((c) => c.uuid == uuid);
-      }
-
-      // 4. Escribir Datos
-      final ssidChar = getChar(charSSIDUUID);
-      final passChar = getChar(charPassUUID);
-      final configChar = getChar(charConfigUUID); // Host:Port
-      final actionChar = getChar(charActionUUID);
-
-      // Escribir SSID
-      await ssidChar.write(utf8.encode(ssid), withoutResponse: false);
-
-      // Escribir Password
-      await passChar.write(utf8.encode(password), withoutResponse: false);
-
-      // Escribir Configuración (Host:Port)
-      // Combinamos host y port en un solo string para enviarlo fácil
-      String configString = "$host:$port";
-      await configChar.write(utf8.encode(configString), withoutResponse: false);
-
-      // 5. Enviar comando de acción para guardar y conectar
-      await actionChar.write(utf8.encode("SAVE"), withoutResponse: false);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(
-                  'Configuration sent to ${device.platformName}! Device is rebooting/connecting.')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: ${e.toString()}')),
-        );
-      }
-    } finally {
-      // 6. Desconectar siempre
-      if (connected) {
-        await device.disconnect();
-      }
     }
   }
 
   void _startScan() async {
     if (!_permissionsGranted) {
+      // Intentamos pedir de nuevo si no los tiene
       await _requestPermissions();
-      return;
+      if (!_permissionsGranted) return;
     }
 
     try {
-      await FlutterBluePlus.startScan();
+      // Reiniciar escaneo limpio
+      await FlutterBluePlus.stopScan();
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+
       _scanSub = FlutterBluePlus.scanResults.listen((results) {
+        if (!mounted) return;
+
+        List<BluetoothDevice> foundDevices = [];
         for (final r in results) {
-          final name = r.device.platformName;
-          if (name.toLowerCase().startsWith('sensor-')) {
-            if (!_devices.any((d) => d.remoteId == r.device.remoteId)) {
-              setState(() {
-                _devices.add(r.device);
-              });
-            }
+          if (r.device.platformName.toLowerCase().startsWith('sensor-')) {
+            foundDevices.add(r.device);
           }
         }
+
+        setState(() {
+          _devices.clear();
+          for (var d in foundDevices) {
+            if (!_devices.any((existing) => existing.remoteId == d.remoteId)) {
+              _devices.add(d);
+            }
+          }
+        });
       });
     } catch (e) {
-      // ignore: avoid_print
-      print('Bluetooth scan error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Scan error: $e')),
+        );
+      }
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // LÓGICA DE PROVISIONAMIENTO (ESP32)
+  // ---------------------------------------------------------------------------
+
+  Future<void> _provisionDevice(BluetoothDevice device, String ssid,
+      String password, String host, int port) async {
+    if (!mounted) return;
+
+    StreamSubscription? tcpSubscription;
+
+    try {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Connecting to BLE device...')),
+      );
+
+      // Conexión BLE
+      await device.connect(license: License.free, autoConnect: false);
+      if (Platform.isAndroid) await device.requestMtu(512);
+
+      List<BluetoothService> services = await device.discoverServices();
+      BluetoothService targetService = services.firstWhere(
+            (s) => s.uuid == serviceUUID,
+        orElse: () => throw Exception("Service UUID not found on device."),
+      );
+
+      BluetoothCharacteristic getChar(Guid uuid) =>
+          targetService.characteristics.firstWhere((c) => c.uuid == uuid);
+
+      // Escritura de credenciales
+      await getChar(charSSIDUUID).write(utf8.encode(ssid), withoutResponse: false);
+      await getChar(charPassUUID).write(utf8.encode(password), withoutResponse: false);
+      await getChar(charConfigUUID).write(utf8.encode("$host:$port"), withoutResponse: false);
+      await getChar(charActionUUID).write(utf8.encode("SAVE"), withoutResponse: false);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Credentials sent to ${device.platformName}. Waiting for TCP...')),
+        );
+      }
+
+      await device.disconnect();
+
+      if (!mounted) return;
+
+      // Espera de conexión TCP
+      final tcpCompleter = Completer<bool>();
+      tcpSubscription = TCPConn().onClientConnected.listen((socket) {
+        if (!tcpCompleter.isCompleted) {
+          tcpCompleter.complete(true);
+        }
+      });
+
+      await tcpCompleter.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => throw TimeoutException("TCP connection timed out."),
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Device connected via TCP!'), backgroundColor: Colors.green),
+        );
+        // Aquí podrías agregar el dispositivo a _connectedDevices
+      }
+
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: ${e.toString()}'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      tcpSubscription?.cancel();
+      // Reiniciar escaneo para buscar otros sensores
+      _startScan();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // UI DIALOGS & BUILD
+  // ---------------------------------------------------------------------------
+
   void _showConfigDialog(BluetoothDevice device) {
-    final ssidController = TextEditingController();
+    // Usamos el estado actual de la red para pre-llenar
+    final ssidController = TextEditingController(text: _wifiName ?? '');
     final passController = TextEditingController();
     final hostController = TextEditingController(text: _localIp ?? '');
     final portController = TextEditingController(text: _port.toString());
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Configure ${device.platformName}'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-                controller: ssidController,
-                decoration: const InputDecoration(labelText: 'SSID')),
-            TextField(
-                controller: passController,
-                decoration: const InputDecoration(labelText: 'Password')),
-            TextField(
-                controller: hostController,
-                decoration: const InputDecoration(labelText: 'Host')),
-            TextField(
-                controller: portController,
-                decoration: const InputDecoration(labelText: 'PORT')),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Configure ${device.platformName}'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 10,
+              children: [
+                TextField(
+                  controller: hostController,
+                  decoration: const InputDecoration(
+                      labelText: 'Host IP', border: OutlineInputBorder()),
+                ),
+                TextField(
+                  controller: portController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      labelText: 'Port', border: OutlineInputBorder()),
+                ),
+                TextField(
+                  controller: ssidController,
+                  decoration: const InputDecoration(
+                      labelText: 'SSID (WiFi Name)', border: OutlineInputBorder()),
+                ),
+                TextField(
+                  controller: passController,
+                  obscureText: !_passwordVisible,
+                  decoration: InputDecoration(
+                    labelText: 'WiFi Password',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(_passwordVisible
+                          ? Icons.visibility
+                          : Icons.visibility_off),
+                      onPressed: () {
+                        setDialogState(() {
+                          _passwordVisible = !_passwordVisible;
+                        });
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () async {
+                final ssid = ssidController.text;
+                final password = passController.text;
+                final host = hostController.text;
+                final port = int.tryParse(portController.text) ?? _port;
+
+                Navigator.of(context).pop();
+                await _provisionDevice(device, ssid, password, host, port);
+              },
+              child: const Text('Save & Connect'),
+            ),
           ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () async {
-              // For now we only collect values; hooking to actual provisioning/connection
-              final ssid = ssidController.text;
-              final password = passController.text;
-              final host = hostController.text;
-              final port = int.tryParse(portController.text) ?? _port;
-              // TODO: send provisioning data to device via BLE or other mechanism
-              // Debug-print so analyzer doesn't warn about unused vars
-              // ignore: avoid_print
-              print(
-                  'Provisioning -> ssid:$ssid password:${password.isNotEmpty ? '***' : ''} host:$host port:$port');
-              Navigator.of(context)
-                  .pop(); // Cierra el diálogo antes de la conexión
-              await _provisionDevice(device, ssid, password, host, port);
-            },
-            child: const Text('Save'),
-          ),
-        ],
       ),
     );
   }
@@ -248,35 +327,77 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Local IP: ${_localIp ?? '...'}',
-              style: const TextStyle(color: Colors.white70)),
-          const SizedBox(height: 6),
-          Text('Port: $_port', style: const TextStyle(color: Colors.white70)),
-          const SizedBox(height: 12),
+          // Info Panel
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.wifi, size: 20, color: Colors.white70),
+                    const SizedBox(width: 8),
+                    Text('WiFi: ${_wifiName ?? 'Not Connected'}',
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.computer, size: 20, color: Colors.white70),
+                    const SizedBox(width: 8),
+                    Text('Host IP: ${_localIp ?? 'Fetching...'}'),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.numbers, size: 20, color: Colors.white70),
+                    const SizedBox(width: 8),
+                    Text('Port: $_port'),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Lista de escaneo
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Available Bluetooth devices',
-                  style: TextStyle(fontSize: 16)),
-              TextButton.icon(
+              const Text('Available Sensors',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              IconButton(
                 onPressed: () async {
-                  setState(() {
-                    _devices.clear();
-                  });
-                  await FlutterBluePlus.stopScan();
                   _startScan();
                 },
                 icon: const Icon(Icons.refresh),
-                label: const Text('Rescan'),
+                tooltip: 'Rescan',
               )
             ],
           ),
-          const SizedBox(height: 8),
+
+          const Divider(),
+
           Expanded(
             child: _devices.isEmpty
-                ? const Center(
-                child: Text('No devices found',
-                    style: TextStyle(color: Colors.white54)))
+                ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Scanning for devices...',
+                      style: TextStyle(color: Colors.white54)),
+                ],
+              ),
+            )
                 : ListView.separated(
               itemCount: _devices.length,
               separatorBuilder: (_, __) =>
@@ -284,13 +405,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               itemBuilder: (context, index) {
                 final device = _devices[index];
                 return ListTile(
-                  title: Text(device.platformName.isEmpty
-                      ? device.remoteId.str
-                      : device.platformName),
-                  subtitle: Text(device.remoteId.str,
-                      style: const TextStyle(fontSize: 12)),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => _showConfigDialog(device),
+                  leading: const Icon(Icons.bluetooth),
+                  title: Text(device.platformName.isNotEmpty
+                      ? device.platformName
+                      : 'Unknown Device'),
+                  subtitle: Text(device.remoteId.str),
+                  trailing: ElevatedButton(
+                    child: const Text("Setup"),
+                    onPressed: () => _showConfigDialog(device),
+                  ),
                 );
               },
             ),

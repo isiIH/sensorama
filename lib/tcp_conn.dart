@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/cupertino.dart';
@@ -26,6 +27,11 @@ class TCPConn extends ChangeNotifier {
   final List<Socket> _clients = []; // Lista para manejar múltiples sensores
   final List<SensorPacket> packets = [];
 
+  // StreamController para avisar a la UI
+  final _connectionController = StreamController<Socket>.broadcast();
+  // Exponemos el stream público
+  Stream<Socket> get onClientConnected => _connectionController.stream;
+
   /// 🔌 Inicia el servidor para escuchar conexiones entrantes.
   Future<void> start() async {
     try {
@@ -50,6 +56,7 @@ class TCPConn extends ChangeNotifier {
   /// Maneja una nueva conexión de sensor.
   void _handleNewConnection(Socket client) {
     _clients.add(client);
+    _connectionController.add(client);
     print('Sensor conectado desde ${client.remoteAddress.address}:${client.remotePort}');
 
     String messageBuffer = "";
@@ -116,6 +123,7 @@ class TCPConn extends ChangeNotifier {
       client.destroy();
     }
     _clients.clear();
+    _connectionController.close();
     print('🚪 Servidor cerrado.');
   }
 }

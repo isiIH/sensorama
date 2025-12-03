@@ -31,6 +31,9 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
   // --- UI ---
   bool _passwordVisible = false;
+  // --- Selection ---
+  bool _selectionMode = false;
+  final Set<String> _selectedIds = {};
 
   // --- UUIDs ESP32 ---
   final Guid serviceUUID = Guid("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
@@ -320,6 +323,121 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     );
   }
 
+  // Show bulk configuration dialog for selected devices
+  void _showBulkConfigDialog() {
+    final ssidController = TextEditingController(text: _wifiName ?? '');
+    final passController = TextEditingController();
+    final hostController = TextEditingController(text: _localIp ?? '');
+    final portController = TextEditingController(text: _port.toString());
+
+    final selectedCount = _selectedIds.length;
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Configure $selectedCount sensors'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 10,
+              children: [
+                TextField(
+                  controller: hostController,
+                  decoration: const InputDecoration(
+                      labelText: 'Host IP', border: OutlineInputBorder()),
+                ),
+                TextField(
+                  controller: portController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      labelText: 'Port', border: OutlineInputBorder()),
+                ),
+                TextField(
+                  controller: ssidController,
+                  decoration: const InputDecoration(
+                      labelText: 'SSID (WiFi Name)', border: OutlineInputBorder()),
+                ),
+                TextField(
+                  controller: passController,
+                  obscureText: !_passwordVisible,
+                  decoration: InputDecoration(
+                    labelText: 'WiFi Password',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(_passwordVisible
+                          ? Icons.visibility
+                          : Icons.visibility_off),
+                      onPressed: () {
+                        setDialogState(() {
+                          _passwordVisible = !_passwordVisible;
+                        });
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () async {
+                final ssid = ssidController.text;
+                final password = passController.text;
+                final host = hostController.text;
+                final port = int.tryParse(portController.text) ?? _port;
+
+                Navigator.of(context).pop();
+
+                // Build list of BluetoothDevice from selected ids
+                final devicesToProvision = _devices.where((d) => _selectedIds.contains(d.remoteId.str)).toList();
+
+                await _provisionMultipleDevices(devicesToProvision, ssid, password, host, port);
+              },
+              child: const Text('Save & Connect'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Provision multiple devices sequentially
+  Future<void> _provisionMultipleDevices(List<BluetoothDevice> devices, String ssid, String password, String host, int port) async {
+    if (devices.isEmpty) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Provisioning ${devices.length} devices...')),
+    );
+
+    for (var i = 0; i < devices.length; i++) {
+      final dev = devices[i];
+      try {
+        // Provision each device one by one
+        await _provisionDevice(dev, ssid, password, host, port);
+      } catch (e) {
+        // show error for this device but continue with others
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error provisioning ${dev.platformName}: $e')),
+          );
+        }
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Provisioning completed'), backgroundColor: Colors.green),
+      );
+      // Clear selection and exit selection mode
+      setState(() {
+        _selectedIds.clear();
+        _selectionMode = false;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -371,8 +489,42 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Available Sensors',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              Row(
+                children: [
+                  // Master select square: shown only when in selection mode
+                  if (_selectionMode)
+                    GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          if (_selectedIds.length == _devices.length) {
+                            _selectedIds.clear();
+                            _selectionMode = false;
+                          } else {
+                            _selectedIds.clear();
+                            for (var d in _devices) {
+                              _selectedIds.add(d.remoteId.str);
+                            }
+                          }
+                        });
+                      },
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        width: 24,
+                        height: 24,
+                        decoration: BoxDecoration(
+                          color: _selectedIds.length == _devices.length ? Colors.blue : Colors.transparent,
+                          border: Border.all(color: Colors.white54),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: _selectedIds.length == _devices.length
+                            ? const Icon(Icons.check, size: 18, color: Colors.white)
+                            : null,
+                      ),
+                    ),
+                  const Text('Available Sensors',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                ],
+              ),
               IconButton(
                 onPressed: () async {
                   _startScan();
@@ -399,25 +551,87 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               ),
             )
                 : ListView.separated(
-              itemCount: _devices.length,
-              separatorBuilder: (_, __) =>
-              const Divider(color: Colors.white10),
-              itemBuilder: (context, index) {
-                final device = _devices[index];
-                return ListTile(
-                  leading: const Icon(Icons.bluetooth),
-                  title: Text(device.platformName.isNotEmpty
-                      ? device.platformName
-                      : 'Unknown Device'),
-                  subtitle: Text(device.remoteId.str),
-                  trailing: ElevatedButton(
-                    child: const Text("Setup"),
-                    onPressed: () => _showConfigDialog(device),
+                    itemCount: _devices.length,
+                    separatorBuilder: (_, __) => const Divider(color: Colors.white10),
+                    itemBuilder: (context, index) {
+                      final device = _devices[index];
+                      final id = device.remoteId.str;
+                      final isSelected = _selectedIds.contains(id);
+
+                      return ListTile(
+                        onLongPress: () {
+                          // Enter selection mode and select this item
+                          setState(() {
+                            _selectionMode = true;
+                            _selectedIds.add(id);
+                          });
+                        },
+                        onTap: () {
+                          if (_selectionMode) {
+                            setState(() {
+                              if (isSelected) {
+                                _selectedIds.remove(id);
+                                if (_selectedIds.isEmpty) _selectionMode = false;
+                              } else {
+                                _selectedIds.add(id);
+                              }
+                            });
+                          } else {
+                            _showConfigDialog(device);
+                          }
+                        },
+                        leading: _selectionMode
+                            ? GestureDetector(
+                                onTap: () {
+                                  setState(() {
+                                    if (isSelected) {
+                                      _selectedIds.remove(id);
+                                      if (_selectedIds.isEmpty) _selectionMode = false;
+                                    } else {
+                                      _selectedIds.add(id);
+                                    }
+                                  });
+                                },
+                                child: Container(
+                                  width: 28,
+                                  height: 28,
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? Colors.blue : Colors.transparent,
+                                    border: Border.all(color: Colors.white54),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: isSelected
+                                      ? const Icon(Icons.check, size: 18, color: Colors.white)
+                                      : null,
+                                ),
+                              )
+                            : const Icon(Icons.bluetooth),
+                        title: Text(device.platformName.isNotEmpty
+                            ? device.platformName
+                            : 'Unknown Device'),
+                        subtitle: Text(id),
+                        trailing: _selectionMode
+                            ? null
+                            : ElevatedButton(
+                                child: const Text("Setup"),
+                                onPressed: () => _showConfigDialog(device),
+                              ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
+          // Bulk action button shown when selection mode is active
+          if (_selectionMode)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12.0),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _selectedIds.isEmpty ? null : _showBulkConfigDialog,
+                  child: Text('Setup Selection (${_selectedIds.length})'),
+                ),
+              ),
+            ),
         ],
       ),
     );

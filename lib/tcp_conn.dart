@@ -39,26 +39,26 @@ class TCPConn extends ChangeNotifier {
     try {
       String? ipAddress = await getLocalIpAddress();
       if (ipAddress != null) {
-        print('Local IP Address: $ipAddress');
+        debugPrint('Local IP Address: $ipAddress');
       } else {
-        print('Could not get local IP address.');
+        debugPrint('Could not get local IP address.');
       }
       // 1. Iniciar el servidor en el puerto especificado.
       // IP.any significa escuchar en todas las interfaces de red disponibles.
       _server = await ServerSocket.bind(InternetAddress.anyIPv4, _port);
-      print('Servidor iniciado en el puerto $_port. Esperando sensores...');
+      debugPrint('Servidor iniciado en el puerto $_port. Esperando sensores...');
 
       // 2. Escuchar nuevas conexiones de sensores.
       _server!.listen(_handleNewConnection);
     } catch (e) {
-      print('Error al iniciar el servidor: $e');
+      debugPrint('Error al iniciar el servidor: $e');
     }
   }
 
   void _registerClient(String sensorId, Socket newClient) {
     // Si ya existe, destruye el socket anterior
     if (_activeClients.containsKey(sensorId)) {
-      print('⚠️ Reemplazando conexión para Sensor ID: $sensorId. Destruyendo socket antiguo.');
+      debugPrint('⚠️ Reemplazando conexión para Sensor ID: $sensorId. Destruyendo socket antiguo.');
       _activeClients[sensorId]?.destroy();
     }
 
@@ -67,7 +67,7 @@ class TCPConn extends ChangeNotifier {
 
     // 3. Notifica a la UI si es necesario
     _connectionController.add(newClient);
-    print('Sensor conectado desde ${newClient.remoteAddress.address}:${newClient
+    debugPrint('Sensor conectado desde ${newClient.remoteAddress.address}:${newClient
         .remotePort}');
   }
 
@@ -93,15 +93,15 @@ class TCPConn extends ChangeNotifier {
             }
           }
         } catch (e) {
-          print("Error procesando buffer: $e");
+          debugPrint("Error procesando buffer: $e");
         }
       },
         onError: (e) {
-          print('Error en conexión: $e');
+          debugPrint('Error en conexión: $e');
           _removeClient(client);
         },
         onDone: () {
-          print('Sensor desconectado.');
+          debugPrint('Sensor desconectado.');
           _removeClient(client);
         },
         cancelOnError: true,
@@ -124,12 +124,12 @@ class TCPConn extends ChangeNotifier {
         packets.add(newPacket);
         notifyListeners();
 
-        print('✅ Recibido: ${newPacket.sensorId} (${newPacket.data.length} bloques)');
+        debugPrint('✅ Recibido: ${newPacket.sensorId} (${newPacket.data.length} bloques)');
       } catch (e) {
-        print('⚠️ JSON malformado a pesar de tener llaves: $e');
+        debugPrint('⚠️ JSON malformado a pesar de tener llaves: $e');
       }
     } else {
-      print('🗑️ Descartado (Incompleto o basura): $jsonString');
+      debugPrint('🗑️ Descartado (Incompleto o basura): $jsonString');
     }
   }
 
@@ -156,7 +156,7 @@ class TCPConn extends ChangeNotifier {
       await _server?.close();
       _server = null;
     } catch (e) {
-      print("Error cerrando servidor: $e");
+      debugPrint("Error cerrando servidor: $e");
     }
 
     // 3. Cierre del StreamController (Solo si se requiere y no está cerrado)
@@ -164,6 +164,6 @@ class TCPConn extends ChangeNotifier {
       await _connectionController.close();
     }
 
-    print('🚪 Servidor cerrado.');
+    debugPrint('🚪 Servidor cerrado.');
   }
 }

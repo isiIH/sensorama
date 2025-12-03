@@ -25,9 +25,9 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
   // --- Estado de Bluetooth ---
   final List<BluetoothDevice> _devices = [];
-  final List<String> _connectedDevices = []; // Lista visual (mock o futura implementación)
   StreamSubscription<List<ScanResult>>? _scanSub;
   bool _permissionsGranted = false;
+  bool _isScanning = false;
 
   // --- UI ---
   bool _passwordVisible = false;
@@ -61,9 +61,11 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
   void _initNetworkListener() {
     // Escucha cambios en la conectividad (WiFi <-> Datos <-> Nada)
-    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
-      _updateNetworkInfo();
-    });
+    _connectivitySub =
+        Connectivity().onConnectivityChanged.listen((results) async {
+          await Future.delayed(const Duration(seconds: 2));
+          _updateNetworkInfo();
+        });
 
     // Carga inicial
     _updateNetworkInfo();
@@ -72,7 +74,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   Future<void> _updateNetworkInfo() async {
     final info = NetworkInfo();
     String? wifiName = await info.getWifiName();
-    String? ip = await info.getWifiIP(); // Usamos network_info_plus para la IP WiFi específicamente
+    String? ip = await info
+        .getWifiIP(); // Usamos network_info_plus para la IP WiFi específicamente
 
     // Si network_info falla o estamos en datos, intentamos el método genérico
     ip ??= await getLocalIpAddress();
@@ -104,7 +107,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       Permission.location, // Necesario para obtener SSID en Android
     ].request();
 
-    final allGranted = statuses.values.every((status) => status.isGranted || status.isDenied); // Lógica permisiva
+    final allGranted = statuses.values.every((status) =>
+    status.isGranted || status.isDenied); // Lógica permisiva
 
     if (mounted) {
       setState(() {
@@ -117,22 +121,76 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
     if (!allGranted && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Permissions are required for scanning and Wifi info.')),
+        const SnackBar(content: Text(
+            'Permissions are required for scanning and Wifi info.')),
       );
     }
   }
 
+  Future<bool> checkBluetoothStatus() async {
+    // Verificar el estado actual inmediatamente
+    var state = await FlutterBluePlus.adapterState.first;
+
+    if (state == BluetoothAdapterState.on) {
+      return true;
+    }
+
+    // 2. Si está apagado y estamos en Android, intentar encenderlo
+    try {
+      await FlutterBluePlus.turnOn();
+
+      // 3. IMPORTANTE: Esperar a que el estado cambie a 'on'
+      // Usamos firstWhere para pausar la ejecución hasta que detectemos el cambio
+      state = await FlutterBluePlus.adapterState.firstWhere(
+            (s) => s == BluetoothAdapterState.on,
+      ).timeout(const Duration(seconds: 5)); // Damos 5 segundos máximo para que prenda
+
+      return state == BluetoothAdapterState.on;
+
+    } catch (e) {
+      print("Error al intentar encender Bluetooth o tiempo de espera agotado: $e");
+      return false;
+    }
+  }
+
   void _startScan() async {
+    if (_isScanning) return;
+
     if (!_permissionsGranted) {
       // Intentamos pedir de nuevo si no los tiene
       await _requestPermissions();
       if (!_permissionsGranted) return;
     }
 
+    bool bleEnabled = await checkBluetoothStatus();
+
+    if (!bleEnabled) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Bluetooth is not enabled.')),
+      );
+      return;
+    }
+
+    setState(() {
+      _isScanning = true;
+    });
+
     try {
+      await _scanSub?.cancel();
+      _scanSub = null;
+
       // Reiniciar escaneo limpio
-      await FlutterBluePlus.stopScan();
+      while (FlutterBluePlus.isScanningNow) {
+        await FlutterBluePlus.stopScan();
+      }
+      await Future.delayed(const Duration(seconds: 1));
       await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+
+      if (mounted) {
+        setState(() {
+          _devices.clear();
+        });
+      }
 
       _scanSub = FlutterBluePlus.scanResults.listen((results) {
         if (!mounted) return;
@@ -145,7 +203,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         }
 
         setState(() {
-          _devices.clear();
           for (var d in foundDevices) {
             if (!_devices.any((existing) => existing.remoteId == d.remoteId)) {
               _devices.add(d);
@@ -153,11 +210,24 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
           }
         });
       });
+
+      await Future.delayed(const Duration(seconds: 15));
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Scan error: $e')),
         );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isScanning = false;
+        });
+
+        // Opcional: Si terminó y no encontró nada, forzamos un stop por si acaso
+        if (FlutterBluePlus.isScanningNow) {
+          await FlutterBluePlus.stopScan();
+        }
       }
     }
   }
@@ -374,11 +444,12 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               const Text('Available Sensors',
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               IconButton(
-                onPressed: () async {
+                onPressed: _isScanning ? null :() async {
                   _startScan();
                 },
                 icon: const Icon(Icons.refresh),
                 tooltip: 'Rescan',
+
               )
             ],
           ),
@@ -390,12 +461,13 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 ? Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
-                children: const [
+                children: _isScanning ?
+                const [
                   CircularProgressIndicator(),
                   SizedBox(height: 16),
                   Text('Scanning for devices...',
                       style: TextStyle(color: Colors.white54)),
-                ],
+                ] : const [ Text("No devices found") ]
               ),
             )
                 : ListView.separated(

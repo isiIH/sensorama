@@ -11,7 +11,7 @@ class NavigationBarScreen extends StatefulWidget {
 }
 
 class _NavigationBarScreenState extends State<NavigationBarScreen> {
-  int _selectedIndex = 1; // 0 = Main (connection), 1 = Graph (dashboard)
+  int _selectedIndex = 1; // 0 = BLE Connection, 1 = Graph
   late final TCPConn _sensorServer;
 
   @override
@@ -45,8 +45,8 @@ class _NavigationBarScreenState extends State<NavigationBarScreen> {
           });
         },
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.wifi), label: 'Main'),
-          NavigationDestination(icon: Icon(Icons.show_chart), label: 'Graph'),
+          NavigationDestination(icon: Icon(Icons.wifi), label: 'Connection'),
+          NavigationDestination(icon: Icon(Icons.show_chart), label: 'Chart'),
         ],
       ),
     );

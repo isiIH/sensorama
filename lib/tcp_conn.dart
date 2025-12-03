@@ -24,7 +24,7 @@ class TCPConn extends ChangeNotifier {
 
   final int _port = int.parse(dotenv.env['PORT']!);
   ServerSocket? _server;
-  final List<Socket> _clients = []; // Lista para manejar múltiples sensores
+  final Map<String, Socket> _activeClients = {};
   final List<SensorPacket> packets = [];
 
   // StreamController para avisar a la UI
@@ -34,6 +34,8 @@ class TCPConn extends ChangeNotifier {
 
   /// 🔌 Inicia el servidor para escuchar conexiones entrantes.
   Future<void> start() async {
+    await stop(closeController: false);
+
     try {
       String? ipAddress = await getLocalIpAddress();
       if (ipAddress != null) {
@@ -53,53 +55,75 @@ class TCPConn extends ChangeNotifier {
     }
   }
 
-  /// Maneja una nueva conexión de sensor.
-  void _handleNewConnection(Socket client) {
-    _clients.add(client);
-    _connectionController.add(client);
-    print('Sensor conectado desde ${client.remoteAddress.address}:${client.remotePort}');
+  void _registerClient(String sensorId, Socket newClient) {
+    // Si ya existe, destruye el socket anterior
+    if (_activeClients.containsKey(sensorId)) {
+      print('⚠️ Reemplazando conexión para Sensor ID: $sensorId. Destruyendo socket antiguo.');
+      _activeClients[sensorId]?.destroy();
+    }
 
-    String messageBuffer = "";
+    // Asigna el nuevo socket
+    _activeClients[sensorId] = newClient;
 
-    // 3. Escuchar los datos enviados por este sensor específico.
-    client.listen((data) {
-      try {
-        messageBuffer += utf8.decode(data, allowMalformed: true);
-
-        while (messageBuffer.contains('\n')) {
-          int newlineIndex = messageBuffer.indexOf('\n');
-          String completeMessage = messageBuffer.substring(0, newlineIndex).trim();
-          messageBuffer = messageBuffer.substring(newlineIndex + 1);
-
-          if (completeMessage.isNotEmpty) {
-            _processMessage(completeMessage);
-          }
-        }
-
-      } catch (e) {
-        print("Error procesando buffer: $e");
-      }
-    },
-      onError: (e) {
-        print('Error en conexión: $e');
-        _removeClient(client);
-      },
-      onDone: () {
-        print('Sensor desconectado.');
-        _removeClient(client);
-      },
-    );
+    // 3. Notifica a la UI si es necesario
+    _connectionController.add(newClient);
+    print('Sensor conectado desde ${newClient.remoteAddress.address}:${newClient
+        .remotePort}');
   }
 
-  void _processMessage(String jsonString) {
+  /// Maneja una nueva conexión de sensor.
+  void _handleNewConnection(Socket client) {
+    if (!_connectionController.isClosed) {
+      String messageBuffer = "";
+
+      // 3. Escuchar los datos enviados por este sensor específico.
+      client.listen((data) {
+        try {
+          messageBuffer += utf8.decode(data, allowMalformed: true);
+
+          while (messageBuffer.contains('\n')) {
+            int newlineIndex = messageBuffer.indexOf('\n');
+            String completeMessage = messageBuffer
+                .substring(0, newlineIndex)
+                .trim();
+            messageBuffer = messageBuffer.substring(newlineIndex + 1);
+
+            if (completeMessage.isNotEmpty) {
+              _processMessage(completeMessage, client);
+            }
+          }
+        } catch (e) {
+          print("Error procesando buffer: $e");
+        }
+      },
+        onError: (e) {
+          print('Error en conexión: $e');
+          _removeClient(client);
+        },
+        onDone: () {
+          print('Sensor desconectado.');
+          _removeClient(client);
+        },
+        cancelOnError: true,
+      );
+    } else {
+      _removeClient(client);
+    }
+  }
+
+  void _processMessage(String jsonString, Socket client) {
     if (jsonString.startsWith('{') && jsonString.endsWith('}')) {
       try {
         final Map<String, dynamic> jsonData = jsonDecode(jsonString);
         final newPacket = SensorPacket.fromJson(jsonData);
 
-        packets.add(newPacket);
+        if (!_activeClients.containsValue(client)) {
+          _registerClient(newPacket.sensorId, client);
+        }
 
+        packets.add(newPacket);
         notifyListeners();
+
         print('✅ Recibido: ${newPacket.sensorId} (${newPacket.data.length} bloques)');
       } catch (e) {
         print('⚠️ JSON malformado a pesar de tener llaves: $e');
@@ -110,20 +134,36 @@ class TCPConn extends ChangeNotifier {
   }
 
   void _removeClient(Socket client) {
-    _clients.remove(client);
-    client.destroy();
+    _activeClients.removeWhere((key, value) => value == client);
+    try {
+      client.destroy();
+    } catch (_) {}
   }
 
   /// Cierra el servidor y todas las conexiones activas.
-  void stop() {
-    _server?.close();
+  Future<void> stop({bool closeController = true}) async {
     packets.clear();
     notifyListeners();
-    for (var client in _clients) {
+
+    // 1. Cerrar todos los clientes
+    for (var client in _activeClients.values) {
       client.destroy();
     }
-    _clients.clear();
-    _connectionController.close();
+    _activeClients.clear();
+
+    // 2. Cierre del Servidor (IMPORTANTE: Esto detiene la emisión de _handleNewConnection)
+    try {
+      await _server?.close();
+      _server = null;
+    } catch (e) {
+      print("Error cerrando servidor: $e");
+    }
+
+    // 3. Cierre del StreamController (Solo si se requiere y no está cerrado)
+    if (closeController && !_connectionController.isClosed) {
+      await _connectionController.close();
+    }
+
     print('🚪 Servidor cerrado.');
   }
 }

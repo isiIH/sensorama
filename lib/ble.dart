@@ -151,8 +151,34 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       return state == BluetoothAdapterState.on;
 
     } catch (e) {
-      print("Error al intentar encender Bluetooth o tiempo de espera agotado: $e");
       return false;
+    }
+  }
+
+  void _showSnackBar(String msg, {bool isError = false}) {
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: isError ? Colors.red : Colors.green,
+      ),
+    );
+  }
+
+  Future<void> startSafeScan() async {
+    // Secuencia de limpieza estricta para evitar "could not find callback wrapper"
+    try {
+      if (FlutterBluePlus.isScanningNow) {
+        await FlutterBluePlus.stopScan();
+      }
+      // El "Respiro" vital para Android
+      await Future.delayed(const Duration(seconds: 1));
+
+      await FlutterBluePlus.startScan(
+        timeout: const Duration(seconds: 15),
+      );
+    } catch (e) {
+      rethrow;
     }
   }
 
@@ -168,9 +194,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     bool bleEnabled = await checkBluetoothStatus();
 
     if (!bleEnabled) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Bluetooth is not enabled.')),
-      );
+      if (mounted) _showSnackBar('Bluetooth is disabled', isError: true);
       return;
     }
 
@@ -183,11 +207,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       _scanSub = null;
 
       // Reiniciar escaneo limpio
-      while (FlutterBluePlus.isScanningNow) {
-        await FlutterBluePlus.stopScan();
-      }
-      await Future.delayed(const Duration(seconds: 1));
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+      await startSafeScan();
 
       if (mounted) {
         setState(() {
@@ -217,39 +237,24 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       await Future.delayed(const Duration(seconds: 15));
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Scan error: $e')),
-        );
+        if (mounted) _showSnackBar('Scan failed: $e', isError: true);
       }
     } finally {
       if (mounted) {
-        setState(() {
-          _isScanning = false;
-        });
-
-        // Opcional: Si terminó y no encontró nada, forzamos un stop por si acaso
-        if (FlutterBluePlus.isScanningNow) {
-          await FlutterBluePlus.stopScan();
-        }
+        setState(() => _isScanning = false);
+        // Asegurar parada
+        if (FlutterBluePlus.isScanningNow) FlutterBluePlus.stopScan();
       }
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // LÓGICA DE PROVISIONAMIENTO (ESP32)
-  // ---------------------------------------------------------------------------
-
-  Future<void> _provisionDevice(BluetoothDevice device, String ssid,
+  Future<void> sendBLEConfig(BluetoothDevice device, String ssid,
       String password, String host, int port) async {
-    if (!mounted) return;
-
-    StreamSubscription? tcpSubscription;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Connecting to BLE device...')),
+    );
 
     try {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Connecting to BLE device...')),
-      );
-
       // Conexión BLE
       await device.connect(license: License.free, autoConnect: false);
       if (Platform.isAndroid) await device.requestMtu(512);
@@ -269,16 +274,30 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       await getChar(charConfigUUID).write(utf8.encode("$host:$port"), withoutResponse: false);
       await getChar(charActionUUID).write(utf8.encode("SAVE"), withoutResponse: false);
 
+      await device.disconnect();
+    } catch(_) {}
+    finally {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Credentials sent to ${device.platformName}. Waiting for TCP...')),
         );
       }
+    }
+  }
 
-      await device.disconnect();
+  // ---------------------------------------------------------------------------
+  // LÓGICA DE PROVISIONAMIENTO (ESP32)
+  // ---------------------------------------------------------------------------
 
-      if (!mounted) return;
+  Future<void> _provisionDevice(BluetoothDevice device, String ssid,
+      String password, String host, int port) async {
+    if (!mounted) return;
 
+    await sendBLEConfig(device, ssid, password, host, port);
+
+    StreamSubscription? tcpSubscription;
+
+    try {
       // Espera de conexión TCP
       final tcpCompleter = Completer<bool>();
       tcpSubscription = TCPConn().onClientConnected.listen((socket) {
@@ -308,7 +327,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       }
     } finally {
       tcpSubscription?.cancel();
-      // Reiniciar escaneo para buscar otros sensores
       _startScan();
     }
   }
@@ -482,7 +500,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     );
 
     // Helper for per-device provisioning with timeout and error capture
-    Future<Map<String, dynamic>> _provisionOne(BluetoothDevice dev) async {
+    Future<Map<String, dynamic>> provisionOne(BluetoothDevice dev) async {
       try {
         await _provisionDevice(dev, ssid, password, host, port)
             .timeout(const Duration(seconds: 30));
@@ -493,7 +511,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     }
 
     // Run all in parallel
-    final results = await Future.wait(devices.map(_provisionOne));
+    final results = await Future.wait(devices.map(provisionOne));
 
     // Aggregate results
     final failed = results.where((r) => r['success'] == false).toList();
@@ -698,12 +716,12 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                             ? device.platformName
                             : 'Unknown Device'),
                         subtitle: Text(id),
-                        trailing: _selectionMode
+                        /*trailing: _selectionMode
                             ? null
                             : ElevatedButton(
                                 child: const Text("Setup"),
                                 onPressed: () => _showConfigDialog(device),
-                              ),
+                              ),*/
                       );
                     },
                   ),
@@ -712,11 +730,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
           if (_selectionMode)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 12.0),
-              child: SizedBox(
-                width: double.infinity,
+              child: Center(
                 child: ElevatedButton(
                   onPressed: _selectedIds.isEmpty ? null : _showBulkConfigDialog,
-                  child: Text('Setup Selection (${_selectedIds.length})'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: Text('Setup Selection (${_selectedIds.length})')
                 ),
               ),
             ),

@@ -413,7 +413,7 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
 
   Widget _buildMultiSensorLegend() {
     if (_activeSensors.isEmpty) {
-      return const Text("Esperando conexión...", style: TextStyle(color: Colors.white54));
+      return const Text("Waiting for data...", style: TextStyle(color: Colors.white54));
     }
 
     return SingleChildScrollView(

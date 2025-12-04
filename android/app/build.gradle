@@ -51,11 +51,30 @@ android {
         versionName flutterVersionName
     }
 
+    signingConfigs {
+        release {
+            // Si existen las variables de entorno, úsalas.
+            if (System.getenv("KEY_ALIAS") != null) {
+                storeFile file("upload-keystore.jks")
+                storePassword System.getenv("KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS")
+                keyPassword System.getenv("KEY_PASSWORD")
+            } else {
+                // Si no, usa la de debug (para desarrollo local)
+                storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
+                // Las contraseñas por defecto de debug son "android"
+                storePassword "android"
+                keyAlias "androiddebugkey"
+                keyPassword "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

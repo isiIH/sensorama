@@ -16,7 +16,7 @@ class ConnectionScreen extends StatefulWidget {
   State<ConnectionScreen> createState() => _ConnectionScreenState();
 }
 
-class _ConnectionScreenState extends State<ConnectionScreen> {
+class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBindingObserver {
   // --- Estado de Red ---
   String? _localIp;
   String? _wifiName;
@@ -26,6 +26,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   // --- Estado de Bluetooth ---
   final List<BluetoothDevice> _devices = [];
   StreamSubscription<List<ScanResult>>? _scanSub;
+  bool _isCheckingPermissions = true;
   bool _permissionsGranted = false;
   bool _isScanning = false;
 
@@ -45,17 +46,146 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   @override
   void initState() {
     super.initState();
-    _requestPermissions();
-    _initNetworkListener(); // Iniciar escucha de red
-    _startScan();
+    WidgetsBinding.instance.addObserver(this);
+    // No iniciamos nada hasta verificar permisos explícitamente
+    _initializeApp();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _scanSub?.cancel();
-    _connectivitySub?.cancel(); // Cancelar escucha de red
+    _connectivitySub?.cancel();
     FlutterBluePlus.stopScan();
     super.dispose();
+  }
+
+  // Detectar cuando la app vuelve al primer plano (útil si fueron a Settings)
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Re-verificar permisos silenciosamente al volver
+      _checkPermissionsStatusOnly();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // LÓGICA DE INICIALIZACIÓN Y PERMISOS MEJORADA
+  // ---------------------------------------------------------------------------
+
+  Future<void> _initializeApp() async {
+    bool granted = await _checkAndRequestPermissions();
+
+    if (mounted) {
+      setState(() {
+        _isCheckingPermissions = false;
+      });
+    }
+
+    if (granted) {
+      _initNetworkListener();
+      _startScan();
+    }
+  }
+
+  /// Verifica permisos sin pedirlos (para actualizar la UI al volver de settings)
+  Future<void> _checkPermissionsStatusOnly() async {
+    final status = _getRequiredPermissions();
+    bool allGranted = true;
+
+    for (var perm in status) {
+      if (!await perm.isGranted) {
+        allGranted = false;
+        break;
+      }
+    }
+
+    if (mounted && allGranted != _permissionsGranted) {
+      setState(() {
+        _permissionsGranted = allGranted;
+      });
+      if (allGranted) {
+        _initNetworkListener();
+        _startScan();
+      }
+    }
+  }
+
+  List<Permission> _getRequiredPermissions() {
+    // Definir permisos según plataforma si es necesario
+    if (Platform.isAndroid) {
+      return [
+        Permission.bluetooth,
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.location, // Requerido para SSID en Android < 12 o hardware legacy
+      ];
+    } else {
+      return [
+        Permission.bluetooth,
+        Permission.location, // iOS a veces requiere ubicación para ciertos metadatos wifi
+      ];
+    }
+  }
+
+  Future<bool> _checkAndRequestPermissions() async {
+    final permissions = _getRequiredPermissions();
+
+    // 1. Solicitamos los permisos
+    Map<Permission, PermissionStatus> statuses = await permissions.request();
+
+    bool allGranted = statuses.values.every((status) => status.isGranted);
+    bool anyPermanentlyDenied = statuses.values.any((status) => status.isPermanentlyDenied);
+
+    if (mounted) {
+      setState(() {
+        _permissionsGranted = allGranted;
+      });
+    }
+
+    if (allGranted) {
+      return true;
+    }
+
+    // 2. Manejo de denegación permanente
+    if (anyPermanentlyDenied && mounted) {
+      _showSettingsDialog();
+      return false;
+    }
+
+    // 3. Manejo de denegación simple (el usuario dijo "No" esta vez)
+    if (!allGranted && mounted) {
+      _showSnackBar('Permissions are required to scan and connect.', isError: true);
+    }
+
+    return false;
+  }
+
+  void _showSettingsDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Permissions Required'),
+        content: const Text(
+            'Bluetooth and Location permissions are permanently denied. '
+                'Please enable them in the app settings to use this feature.'
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              openAppSettings(); // Abre la configuración del sistema
+            },
+            child: const Text('Open Settings'),
+          ),
+        ],
+      ),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -63,28 +193,26 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   // ---------------------------------------------------------------------------
 
   void _initNetworkListener() {
-    // Escucha cambios en la conectividad (WiFi <-> Datos <-> Nada)
-    _connectivitySub =
-        Connectivity().onConnectivityChanged.listen((results) async {
-          await Future.delayed(const Duration(seconds: 2));
-          _updateNetworkInfo();
-        });
+    // Guard clause: Si no hay permisos, no escuchar.
+    if (!_permissionsGranted) return;
 
-    // Carga inicial
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) async {
+      await Future.delayed(const Duration(seconds: 2));
+      _updateNetworkInfo();
+    });
     _updateNetworkInfo();
   }
 
   Future<void> _updateNetworkInfo() async {
+    if (!_permissionsGranted) return;
+
     final info = NetworkInfo();
     String? wifiName = await info.getWifiName();
-    String? ip = await info
-        .getWifiIP(); // Usamos network_info_plus para la IP WiFi específicamente
+    String? ip = await info.getWifiIP();
 
-    // Si network_info falla o estamos en datos, intentamos el método genérico
     ip ??= await getLocalIpAddress();
 
     if (wifiName != null) {
-      // Limpieza de comillas que devuelve iOS/Android a veces
       if (wifiName.startsWith('"') && wifiName.endsWith('"')) {
         wifiName = wifiName.substring(1, wifiName.length - 1);
       }
@@ -99,46 +227,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // GESTIÓN DE PERMISOS Y BLUETOOTH
+  // GESTIÓN DE BLUETOOTH
   // ---------------------------------------------------------------------------
-
-  Future<void> _requestPermissions() async {
-    final Map<Permission, PermissionStatus> statuses = await [
-      Permission.bluetooth,
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      Permission.location, // Necesario para obtener SSID en Android
-    ].request();
-
-    final allGranted = statuses.values.every((status) =>
-    status.isGranted || status.isDenied); // Lógica permisiva
-
-    if (mounted) {
-      setState(() {
-        _permissionsGranted = allGranted;
-      });
-
-      // Si tenemos permisos, actualizamos la info de red (el SSID requiere Location)
-      if (allGranted) _updateNetworkInfo();
-    }
-
-    if (!allGranted && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text(
-            'Permissions are required for scanning and Wifi info.')),
-      );
-    }
-  }
 
   Future<bool> checkBluetoothStatus() async {
     // Verificar el estado actual inmediatamente
     var state = await FlutterBluePlus.adapterState.first;
+    if (state == BluetoothAdapterState.on) return true;
 
-    if (state == BluetoothAdapterState.on) {
-      return true;
-    }
-
-    // 2. Si está apagado y estamos en Android, intentar encenderlo
+    // Si está apagado, intentar encenderlo
     try {
       await FlutterBluePlus.turnOn();
 
@@ -186,13 +283,12 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     if (_isScanning) return;
 
     if (!_permissionsGranted) {
-      // Intentamos pedir de nuevo si no los tiene
-      await _requestPermissions();
-      if (!_permissionsGranted) return;
+      // Intenta pedir permisos nuevamente si el usuario intenta escanear
+      bool granted = await _checkAndRequestPermissions();
+      if (!granted) return;
     }
 
     bool bleEnabled = await checkBluetoothStatus();
-
     if (!bleEnabled) {
       if (mounted) _showSnackBar('Bluetooth is disabled', isError: true);
       return;
@@ -544,6 +640,38 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Verificar si está cargando permisos
+    if (_isCheckingPermissions) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    // SI NO HAY PERMISOS, MOSTRAMOS PANTALLA DE BLOQUEO UI
+    if (!_permissionsGranted) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text(
+                'Permissions Required',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)
+            ),
+            const SizedBox(height: 8),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 32),
+              child: Text(
+                'We need Bluetooth and Location access to scan for sensors and WiFi info.',
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: _checkAndRequestPermissions,
+              child: const Text('Grant Permissions'),
+            )
+          ],
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
@@ -595,7 +723,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
             children: [
               Row(
                 children: [
-                  // Master select square: shown only when in selection mode
                   if (_selectionMode)
                     GestureDetector(
                       onTap: () {
@@ -630,12 +757,9 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 ],
               ),
               IconButton(
-                onPressed: _isScanning ? null :() async {
-                  _startScan();
-                },
+                onPressed: _isScanning ? null : () => _startScan(),
                 icon: const Icon(Icons.refresh),
                 tooltip: 'Rescan',
-
               )
             ],
           ),
@@ -646,98 +770,90 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
             child: _devices.isEmpty
                 ? Center(
               child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: _isScanning ?
-                const [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('Scanning for devices...',
-                      style: TextStyle(color: Colors.white54)),
-                ] : const [ Text("No devices found") ]
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: _isScanning ?
+                  const [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 16),
+                    Text('Scanning for devices...',
+                        style: TextStyle(color: Colors.white54)),
+                  ] : const [ Text("No devices found") ]
               ),
             )
                 : ListView.separated(
-                    itemCount: _devices.length,
-                    separatorBuilder: (_, __) => const Divider(color: Colors.white10),
-                    itemBuilder: (context, index) {
-                      final device = _devices[index];
-                      final id = device.remoteId.str;
-                      final isSelected = _selectedIds.contains(id);
+              itemCount: _devices.length,
+              separatorBuilder: (_, __) => const Divider(color: Colors.white10),
+              itemBuilder: (context, index) {
+                final device = _devices[index];
+                final id = device.remoteId.str;
+                final isSelected = _selectedIds.contains(id);
 
-                      return ListTile(
-                        onLongPress: () {
-                          // Enter selection mode and select this item
-                          setState(() {
-                            _selectionMode = true;
-                            _selectedIds.add(id);
-                          });
-                        },
-                        onTap: () {
-                          if (_selectionMode) {
-                            setState(() {
-                              if (isSelected) {
-                                _selectedIds.remove(id);
-                                if (_selectedIds.isEmpty) _selectionMode = false;
-                              } else {
-                                _selectedIds.add(id);
-                              }
-                            });
-                          } else {
-                            _showConfigDialog(device);
-                          }
-                        },
-                        leading: _selectionMode
-                            ? GestureDetector(
-                                onTap: () {
-                                  setState(() {
-                                    if (isSelected) {
-                                      _selectedIds.remove(id);
-                                      if (_selectedIds.isEmpty) _selectionMode = false;
-                                    } else {
-                                      _selectedIds.add(id);
-                                    }
-                                  });
-                                },
-                                child: Container(
-                                  width: 28,
-                                  height: 28,
-                                  decoration: BoxDecoration(
-                                    color: isSelected ? Colors.blue : Colors.transparent,
-                                    border: Border.all(color: Colors.white54),
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: isSelected
-                                      ? const Icon(Icons.check, size: 18, color: Colors.white)
-                                      : null,
-                                ),
-                              )
-                            : const Icon(Icons.bluetooth),
-                        title: Text(device.platformName.isNotEmpty
-                            ? device.platformName
-                            : 'Unknown Device'),
-                        subtitle: Text(id),
-                        /*trailing: _selectionMode
-                            ? null
-                            : ElevatedButton(
-                                child: const Text("Setup"),
-                                onPressed: () => _showConfigDialog(device),
-                              ),*/
-                      );
+                return ListTile(
+                  onLongPress: () {
+                    setState(() {
+                      _selectionMode = true;
+                      _selectedIds.add(id);
+                    });
+                  },
+                  onTap: () {
+                    if (_selectionMode) {
+                      setState(() {
+                        if (isSelected) {
+                          _selectedIds.remove(id);
+                          if (_selectedIds.isEmpty) _selectionMode = false;
+                        } else {
+                          _selectedIds.add(id);
+                        }
+                      });
+                    } else {
+                      _showConfigDialog(device);
+                    }
+                  },
+                  leading: _selectionMode
+                      ? GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        if (isSelected) {
+                          _selectedIds.remove(id);
+                          if (_selectedIds.isEmpty) _selectionMode = false;
+                        } else {
+                          _selectedIds.add(id);
+                        }
+                      });
                     },
-                  ),
+                    child: Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: isSelected ? Colors.blue : Colors.transparent,
+                        border: Border.all(color: Colors.white54),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: isSelected
+                          ? const Icon(Icons.check, size: 18, color: Colors.white)
+                          : null,
+                    ),
+                  )
+                      : const Icon(Icons.bluetooth),
+                  title: Text(device.platformName.isNotEmpty
+                      ? device.platformName
+                      : 'Unknown Device'),
+                  subtitle: Text(id),
+                );
+              },
+            ),
           ),
-          // Bulk action button shown when selection mode is active
           if (_selectionMode)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 12.0),
               child: Center(
                 child: ElevatedButton(
-                  onPressed: _selectedIds.isEmpty ? null : _showBulkConfigDialog,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                  ),
-                  child: Text('Setup Selection (${_selectedIds.length})')
+                    onPressed: _selectedIds.isEmpty ? null : _showBulkConfigDialog,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
+                    ),
+                    child: Text('Setup Selection (${_selectedIds.length})')
                 ),
               ),
             ),

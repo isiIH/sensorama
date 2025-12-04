@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'tcp_conn.dart';
+import 'udp_conn.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:network_info_plus/network_info_plus.dart';
@@ -42,6 +43,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   final Guid charPassUUID = Guid("82141505-1a35-463d-9d7a-1808d4b005c3");
   final Guid charConfigUUID = Guid("e4b60b73-0456-4c4f-bc14-22280d507116");
   final Guid charActionUUID = Guid("69c2794c-8594-4b53-b093-a61574697960");
+  final Guid charProtoUUID = Guid("12345678-1234-1234-1234-1234567890ab");
 
   @override
   void initState() {
@@ -345,7 +347,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   }
 
   Future<void> sendBLEConfig(BluetoothDevice device, String ssid,
-      String password, String host, int port) async {
+      String password, String host, int port, String protocol) async {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Connecting to BLE device...')),
     );
@@ -368,6 +370,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
       await getChar(charSSIDUUID).write(utf8.encode(ssid), withoutResponse: false);
       await getChar(charPassUUID).write(utf8.encode(password), withoutResponse: false);
       await getChar(charConfigUUID).write(utf8.encode("$host:$port"), withoutResponse: false);
+      await getChar(charProtoUUID).write(utf8.encode(protocol), withoutResponse: false);
       await getChar(charActionUUID).write(utf8.encode("SAVE"), withoutResponse: false);
 
       await device.disconnect();
@@ -375,7 +378,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
     finally {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Credentials sent to ${device.platformName}. Waiting for TCP...')),
+          SnackBar(content: Text('Credentials sent to ${device.platformName}. Waiting for $protocol...')),
         );
       }
     }
@@ -386,31 +389,39 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   // ---------------------------------------------------------------------------
 
   Future<void> _provisionDevice(BluetoothDevice device, String ssid,
-      String password, String host, int port) async {
+      String password, String host, int port, String protocol) async {
     if (!mounted) return;
 
-    await sendBLEConfig(device, ssid, password, host, port);
+    await sendBLEConfig(device, ssid, password, host, port, protocol);
 
-    StreamSubscription? tcpSubscription;
+    StreamSubscription? connectionSubscription;
 
     try {
-      // Espera de conexión TCP
-      final tcpCompleter = Completer<bool>();
-      tcpSubscription = TCPConn().onClientConnected.listen((socket) {
-        if (!tcpCompleter.isCompleted) {
-          tcpCompleter.complete(true);
-        }
-      });
+      // Espera de conexión
+      final connectionCompleter = Completer<bool>();
+      if (protocol.toUpperCase() == 'TCP') {
+        connectionSubscription = TCPConn().onClientConnected.listen((socket) {
+          if (!connectionCompleter.isCompleted) {
+            connectionCompleter.complete(true);
+          }
+        });
+      } else if (protocol.toUpperCase() == 'UDP') {
+        connectionSubscription = UDPConn().onClientConnected.listen((clientId) {
+          if (!connectionCompleter.isCompleted) {
+            connectionCompleter.complete(true);
+          }
+        });
+      }
 
-      await tcpCompleter.future.timeout(
+      await connectionCompleter.future.timeout(
         const Duration(seconds: 30),
-        onTimeout: () => throw TimeoutException("TCP connection timed out."),
+        onTimeout: () => throw TimeoutException("$protocol connection timed out."),
       );
 
       if (mounted) {
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Device connected via TCP!'), backgroundColor: Colors.green),
+          SnackBar(content: Text('Device connected via $protocol!'), backgroundColor: Colors.green),
         );
         // Aquí podrías agregar el dispositivo a _connectedDevices
       }
@@ -422,7 +433,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
         );
       }
     } finally {
-      tcpSubscription?.cancel();
+      connectionSubscription?.cancel();
       _startScan();
     }
   }
@@ -437,6 +448,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
     final passController = TextEditingController();
     final hostController = TextEditingController(text: _localIp ?? '');
     final portController = TextEditingController(text: _port.toString());
+    String selectedProtocol = 'TCP';
 
     showDialog(
       context: context,
@@ -497,7 +509,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
                 final port = int.tryParse(portController.text) ?? _port;
 
                 Navigator.of(context).pop();
-                await _provisionDevice(device, ssid, password, host, port);
+                await _provisionDevice(device, ssid, password, host, port, selectedProtocol);
               },
               child: const Text('Save & Connect'),
             ),
@@ -513,6 +525,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
     final passController = TextEditingController();
     final hostController = TextEditingController(text: _localIp ?? '');
     final portController = TextEditingController(text: _port.toString());
+    String selectedProtocol = 'TCP'; // Default to TCP
 
     final selectedCount = _selectedIds.length;
 
@@ -577,7 +590,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
                 // Build list of BluetoothDevice from selected ids
                 final devicesToProvision = _devices.where((d) => _selectedIds.contains(d.remoteId.str)).toList();
 
-                await _provisionMultipleDevices(devicesToProvision, ssid, password, host, port);
+                await _provisionMultipleDevices(devicesToProvision, ssid, password, host, port, selectedProtocol);
               },
               child: const Text('Save & Connect'),
             ),
@@ -588,7 +601,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   }
 
   // Provision multiple devices sequentially
-  Future<void> _provisionMultipleDevices(List<BluetoothDevice> devices, String ssid, String password, String host, int port) async {
+  Future<void> _provisionMultipleDevices(List<BluetoothDevice> devices, String ssid, String password, String host, int port, protocol) async {
     if (devices.isEmpty) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -598,7 +611,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
     // Helper for per-device provisioning with timeout and error capture
     Future<Map<String, dynamic>> provisionOne(BluetoothDevice dev) async {
       try {
-        await _provisionDevice(dev, ssid, password, host, port)
+        await _provisionDevice(dev, ssid, password, host, port, protocol)
             .timeout(const Duration(seconds: 30));
         return {'id': dev.remoteId.str, 'name': dev.platformName, 'success': true};
       } catch (e) {

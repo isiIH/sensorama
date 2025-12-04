@@ -5,6 +5,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:intl/intl.dart';
 import 'tcp_conn.dart';
+import 'udp_conn.dart';
 import 'sensor_config.dart';
 
 // --- CONFIGURACIÓN DE VISUALIZACIÓN GLOBAL ---
@@ -95,6 +96,7 @@ class RealTimeChart extends StatefulWidget {
 
 class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProviderStateMixin {
   late final TCPConn _tcpConn;
+  late final UDPConn _udpConn;
   late final Ticker _ticker;
 
   final Map<String, SensorStream> _activeSensors = {};
@@ -126,8 +128,10 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
   void initState() {
     super.initState();
     _tcpConn = TCPConn();
-    // 🔑 El listener ahora reacciona a los cambios de datos Y al estado de conexión
+    _udpConn = UDPConn();
+    // 🔑 El listener ahora reacciona a los cambios de datos Y al estado de conexión para ambos protocolos
     _tcpConn.addListener(_onNewSensorData);
+    _udpConn.addListener(_onNewSensorData);
     _ticker = createTicker(_onTick);
     _ticker.start();
   }
@@ -136,15 +140,26 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
   void dispose() {
     _ticker.dispose();
     _tcpConn.removeListener(_onNewSensorData);
+    _udpConn.removeListener(_onNewSensorData);
     super.dispose();
   }
 
   // --- PROCESAMIENTO DE PAQUETES DE RED ---
   void _onNewSensorData() {
-    if (_tcpConn.packets.isEmpty) return;
+    // Procesar paquetes TCP
+    if (_tcpConn.packets.isNotEmpty) {
+      final SensorPacket packet = _tcpConn.packets.last;
+      _processSensorPacket(packet);
+    }
 
-    final SensorPacket packet = _tcpConn.packets.last;
+    // Procesar paquetes UDP
+    if (_udpConn.packets.isNotEmpty) {
+      final SensorPacket packet = _udpConn.packets.last;
+      _processSensorPacket(packet);
+    }
+  }
 
+  void _processSensorPacket(SensorPacket packet) {
     _globalStartTime ??= packet.data.first.timestamp;
 
     if (!_activeSensors.containsKey(packet.sensorId)) {

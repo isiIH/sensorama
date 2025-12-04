@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'tcp_conn.dart';
+import 'udp_conn.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:network_info_plus/network_info_plus.dart';
@@ -25,7 +26,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
   // --- Estado de Bluetooth ---
   final List<BluetoothDevice> _devices = [];
-  final List<String> _connectedDevices = []; // Lista visual (mock o futura implementación)
   StreamSubscription<List<ScanResult>>? _scanSub;
   bool _permissionsGranted = false;
 
@@ -41,6 +41,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   final Guid charPassUUID = Guid("82141505-1a35-463d-9d7a-1808d4b005c3");
   final Guid charConfigUUID = Guid("e4b60b73-0456-4c4f-bc14-22280d507116");
   final Guid charActionUUID = Guid("69c2794c-8594-4b53-b093-a61574697960");
+  final Guid charProtoUUID = Guid("12345678-1234-1234-1234-1234567890ab");
 
   @override
   void initState() {
@@ -170,14 +171,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   // ---------------------------------------------------------------------------
 
   Future<void> _provisionDevice(BluetoothDevice device, String ssid,
-      String password, String host, int port) async {
+      String password, String host, int port, String protocol) async {
     if (!mounted) return;
 
-    StreamSubscription? tcpSubscription;
+    StreamSubscription? connectionSubscription;
 
     try {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Connecting to BLE device...')),
+        SnackBar(content: Text('Connecting to BLE device... (Protocol: $protocol)')),
       );
 
       // Conexión BLE
@@ -197,11 +198,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       await getChar(charSSIDUUID).write(utf8.encode(ssid), withoutResponse: false);
       await getChar(charPassUUID).write(utf8.encode(password), withoutResponse: false);
       await getChar(charConfigUUID).write(utf8.encode("$host:$port"), withoutResponse: false);
+      
+      // Escribir el protocolo (TCP o UDP)
+      await getChar(charProtoUUID).write(utf8.encode(protocol), withoutResponse: false);
+      
       await getChar(charActionUUID).write(utf8.encode("SAVE"), withoutResponse: false);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Credentials sent to ${device.platformName}. Waiting for TCP...')),
+          SnackBar(content: Text('Credentials sent to ${device.platformName}. Waiting for $protocol...')),
         );
       }
 
@@ -209,25 +214,33 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
       if (!mounted) return;
 
-      // Espera de conexión TCP
-      final tcpCompleter = Completer<bool>();
-      tcpSubscription = TCPConn().onClientConnected.listen((socket) {
-        if (!tcpCompleter.isCompleted) {
-          tcpCompleter.complete(true);
-        }
-      });
+      // Espera de conexión según el protocolo elegido
+      final connectionCompleter = Completer<bool>();
+      
+      if (protocol.toUpperCase() == 'TCP') {
+        connectionSubscription = TCPConn().onClientConnected.listen((socket) {
+          if (!connectionCompleter.isCompleted) {
+            connectionCompleter.complete(true);
+          }
+        });
+      } else if (protocol.toUpperCase() == 'UDP') {
+        connectionSubscription = UDPConn().onClientConnected.listen((clientId) {
+          if (!connectionCompleter.isCompleted) {
+            connectionCompleter.complete(true);
+          }
+        });
+      }
 
-      await tcpCompleter.future.timeout(
+      await connectionCompleter.future.timeout(
         const Duration(seconds: 30),
-        onTimeout: () => throw TimeoutException("TCP connection timed out."),
+        onTimeout: () => throw TimeoutException("$protocol connection timed out."),
       );
 
       if (mounted) {
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Device connected via TCP!'), backgroundColor: Colors.green),
+          SnackBar(content: Text('Device connected via $protocol!'), backgroundColor: Colors.green),
         );
-        // Aquí podrías agregar el dispositivo a _connectedDevices
       }
 
     } catch (e) {
@@ -237,7 +250,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         );
       }
     } finally {
-      tcpSubscription?.cancel();
+      connectionSubscription?.cancel();
       // Reiniciar escaneo para buscar otros sensores
       _startScan();
     }
@@ -253,6 +266,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     final passController = TextEditingController();
     final hostController = TextEditingController(text: _localIp ?? '');
     final portController = TextEditingController(text: _port.toString());
+    String selectedProtocol = 'TCP'; // Default to TCP
 
     showDialog(
       context: context,
@@ -264,6 +278,22 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               mainAxisSize: MainAxisSize.min,
               spacing: 10,
               children: [
+                DropdownButtonFormField<String>(
+                  value: selectedProtocol,
+                  items: const [
+                    DropdownMenuItem(value: 'TCP', child: Text('TCP')),
+                    DropdownMenuItem(value: 'UDP', child: Text('UDP')),
+                  ],
+                  onChanged: (value) {
+                    setDialogState(() {
+                      selectedProtocol = value ?? 'TCP';
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    labelText: 'Protocol',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
                 TextField(
                   controller: hostController,
                   decoration: const InputDecoration(
@@ -313,7 +343,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 final port = int.tryParse(portController.text) ?? _port;
 
                 Navigator.of(context).pop();
-                await _provisionDevice(device, ssid, password, host, port);
+                await _provisionDevice(device, ssid, password, host, port, selectedProtocol);
               },
               child: const Text('Save & Connect'),
             ),
@@ -329,6 +359,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     final passController = TextEditingController();
     final hostController = TextEditingController(text: _localIp ?? '');
     final portController = TextEditingController(text: _port.toString());
+    String selectedProtocol = 'TCP'; // Default to TCP
 
     final selectedCount = _selectedIds.length;
 
@@ -342,6 +373,22 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               mainAxisSize: MainAxisSize.min,
               spacing: 10,
               children: [
+                DropdownButtonFormField<String>(
+                  value: selectedProtocol,
+                  items: const [
+                    DropdownMenuItem(value: 'TCP', child: Text('TCP')),
+                    DropdownMenuItem(value: 'UDP', child: Text('UDP')),
+                  ],
+                  onChanged: (value) {
+                    setDialogState(() {
+                      selectedProtocol = value ?? 'TCP';
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    labelText: 'Protocol',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
                 TextField(
                   controller: hostController,
                   decoration: const InputDecoration(
@@ -393,7 +440,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 // Build list of BluetoothDevice from selected ids
                 final devicesToProvision = _devices.where((d) => _selectedIds.contains(d.remoteId.str)).toList();
 
-                await _provisionMultipleDevices(devicesToProvision, ssid, password, host, port);
+                await _provisionMultipleDevices(devicesToProvision, ssid, password, host, port, selectedProtocol);
               },
               child: const Text('Save & Connect'),
             ),
@@ -404,17 +451,17 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   // Provision multiple devices sequentially
-  Future<void> _provisionMultipleDevices(List<BluetoothDevice> devices, String ssid, String password, String host, int port) async {
+  Future<void> _provisionMultipleDevices(List<BluetoothDevice> devices, String ssid, String password, String host, int port, String protocol) async {
     if (devices.isEmpty) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Provisioning ${devices.length} devices in parallel...')),
+      SnackBar(content: Text('Provisioning ${devices.length} devices in parallel... ($protocol)')),
     );
 
     // Helper for per-device provisioning with timeout and error capture
     Future<Map<String, dynamic>> _provisionOne(BluetoothDevice dev) async {
       try {
-        await _provisionDevice(dev, ssid, password, host, port)
+        await _provisionDevice(dev, ssid, password, host, port, protocol)
             .timeout(const Duration(seconds: 30));
         return {'id': dev.remoteId.str, 'name': dev.platformName, 'success': true};
       } catch (e) {
@@ -432,7 +479,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     if (mounted) {
       if (succeeded.isNotEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Provisioned ${succeeded.length} devices successfully.'), backgroundColor: Colors.green),
+          SnackBar(content: Text('Provisioned ${succeeded.length} devices successfully via $protocol.'), backgroundColor: Colors.green),
         );
       }
       if (failed.isNotEmpty) {

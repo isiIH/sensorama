@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'tcp_conn.dart';
+import 'udp_conn.dart';
 import 'ble.dart';
 import 'dashboard.dart';
 
@@ -12,20 +13,24 @@ class NavigationBarScreen extends StatefulWidget {
 
 class _NavigationBarScreenState extends State<NavigationBarScreen> {
   int _selectedIndex = 1; // 0 = Main (connection), 1 = Graph (dashboard)
-  late final TCPConn _sensorServer;
+  late final TCPConn _tcpServer;
+  late final UDPConn _udpServer;
 
   @override
   void initState() {
     super.initState();
-    _sensorServer = TCPConn();
-    _sensorServer.start();
+    _tcpServer = TCPConn();
+    _udpServer = UDPConn();
+    _tcpServer.start();
+    _udpServer.start();
   }
 
   @override
   void dispose() {
     // TODO: implement dispose
     super.dispose();
-    _sensorServer.stop();
+    _tcpServer.stop();
+    _udpServer.stop();
   }
 
   @override

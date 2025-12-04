@@ -39,7 +39,9 @@ jobs:
 
       # 4. Install Dependencies
       - name: Install Dependencies
-        run: flutter pub get
+        run: |
+          flutter pub get
+          flutter clean
 
       # 5. Create .env file
       - name: Create .env file

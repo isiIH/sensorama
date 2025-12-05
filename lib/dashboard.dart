@@ -146,16 +146,26 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
 
   // --- PROCESAMIENTO DE PAQUETES DE RED ---
   void _onNewSensorData() {
-    // Procesar paquetes TCP
+    // 1. Procesar y LIMPIAR cola TCP
     if (_tcpConn.packets.isNotEmpty) {
-      final SensorPacket packet = _tcpConn.packets.last;
-      _processSensorPacket(packet);
+      // Hacemos una copia local de la lista para iterar seguro
+      final List<SensorPacket> tcpPackets = List.from(_tcpConn.packets);
+      // Limpiamos la lista original INMEDIATAMENTE para no reprocesarlos
+      _tcpConn.packets.clear();
+
+      for (var packet in tcpPackets) {
+        _processSensorPacket(packet);
+      }
     }
 
-    // Procesar paquetes UDP
+    // 2. Procesar y LIMPIAR cola UDP
     if (_udpConn.packets.isNotEmpty) {
-      final SensorPacket packet = _udpConn.packets.last;
-      _processSensorPacket(packet);
+      final List<SensorPacket> udpPackets = List.from(_udpConn.packets);
+      _udpConn.packets.clear();
+
+      for (var packet in udpPackets) {
+        _processSensorPacket(packet);
+      }
     }
   }
 

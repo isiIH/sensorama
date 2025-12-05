@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
 import 'dart:typed_data';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'sensor_config.dart';
@@ -39,7 +38,8 @@ class TCPConn extends ChangeNotifier {
 
   /// 🔌 Inicia el servidor para escuchar conexiones entrantes.
   Future<void> start() async {
-    await stop(closeController: false);
+    // Si ya está corriendo, no hacer nada
+    if (_server != null) return;
 
     try {
       String? ipAddress = await getLocalIpAddress();
@@ -56,49 +56,34 @@ class TCPConn extends ChangeNotifier {
     }
   }
 
-  void _registerClient(String sensorId, Socket newClient) {
-    // Si ya existe, destruye el socket anterior
-    if (_activeClients.containsKey(sensorId)) {
-      debugPrint('⚠️ Reemplazando conexión para Sensor ID: $sensorId. Destruyendo socket antiguo.');
-      _activeClients[sensorId]?.destroy();
-    }
-
-    // Asigna el nuevo socket
-    _activeClients[sensorId] = newClient;
-
-    // 3. Notifica a la UI si es necesario
-    _connectionController.add(newClient);
-    debugPrint('Sensor conectado desde ${newClient.remoteAddress.address}:${newClient
-        .remotePort}');
-  }
-
-  /// Maneja una nueva conexión de sensor.
+  /// Maneja la conexión física (TCP Handshake completo)
   void _handleNewConnection(Socket client) {
-    if (!_connectionController.isClosed) {
-      final BytesBuilder socketBuffer = BytesBuilder();
+    final clientAddress = client.remoteAddress.address;
+    debugPrint('🔌 Nuevo cliente TCP conectado: $clientAddress');
 
-      // 3. Escuchar los datos enviados por este sensor específico.
-      client.listen((Uint8List data) {
-        try {
-          socketBuffer.add(data);
+    // 1. Registramos cliente y NOTIFICAMOS INMEDIATAMENTE
+    _activeClients[clientAddress] = client;
+    _connectionController.add(client); // <--- ESTO DESBLOQUEA TU UI EN BLE.DART
 
-          _processBuffer(client, socketBuffer);
-        } catch (e) {
-          debugPrint("Error procesando buffer: $e");
-        }
+    // 2. Preparamos buffer para este cliente
+    final BytesBuilder socketBuffer = BytesBuilder();
+
+    // 3. Escuchar datos
+    client.listen(
+          (Uint8List data) {
+        socketBuffer.add(data);
+        _processBuffer(client, socketBuffer);
       },
-        onError: (e) {
-          debugPrint('Error en conexión: $e');
-          _removeClient(client);
-        },
-        onDone: () {
-          _removeClient(client);
-        },
-        cancelOnError: true,
-      );
-    } else {
-      _removeClient(client);
-    }
+      onError: (e) {
+        debugPrint('⚠️ Error en socket $clientAddress: $e');
+        _removeClient(clientAddress, client);
+      },
+      onDone: () {
+        debugPrint('👋 Cliente desconectado: $clientAddress');
+        _removeClient(clientAddress, client);
+      },
+      cancelOnError: true,
+    );
   }
 
   void _processBuffer(Socket client, BytesBuilder buffer) {
@@ -150,6 +135,7 @@ class TCPConn extends ChangeNotifier {
   /// Decodifica un paquete binario VALIDADO y COMPLETO
   void _decodePacket(Socket client, Uint8List bytes, int nSamples, int mDims) {
     try {
+      print("active clients: ${_activeClients.length}");
       final buffer = ByteData.sublistView(bytes);
       int readPtr = 0;
 
@@ -214,10 +200,6 @@ class TCPConn extends ChangeNotifier {
       packets.add(packet);
       notifyListeners();
 
-      if (!_activeClients.containsKey(packet.sensorId)) {
-        _registerClient(packet.sensorId, client);
-      }
-
       debugPrint('✅ Recibido: ${packet.sensorId} (${packet.data.length} datos)');
 
     } catch (e) {
@@ -225,60 +207,25 @@ class TCPConn extends ChangeNotifier {
     }
   }
 
-  void _processMessage(String jsonString, Socket client) {
-    if (jsonString.startsWith('{') && jsonString.endsWith('}')) {
-      try {
-        final Map<String, dynamic> jsonData = jsonDecode(jsonString);
-        final newPacket = SensorPacket.fromJson(jsonData);
-
-        if (!_activeClients.containsValue(client)) {
-          _registerClient(newPacket.sensorId, client);
-        }
-
-        packets.add(newPacket);
-        notifyListeners();
-
-        debugPrint('✅ Recibido: ${newPacket.sensorId} (${newPacket.data.length} bloques)');
-      } catch (e) {
-        debugPrint('⚠️ JSON malformado a pesar de tener llaves: $e');
-      }
-    } else {
-      debugPrint('🗑️ Descartado (Incompleto o basura): $jsonString');
-    }
-  }
-
-  void _removeClient(Socket client) {
-    _activeClients.removeWhere((key, value) => value == client);
+  void _removeClient(String address, Socket client) {
+    _activeClients.remove(address);
     try {
       client.destroy();
     } catch (_) {}
-    debugPrint('Sensor desconectado.');
+    notifyListeners();
   }
 
   /// Cierra el servidor y todas las conexiones activas.
-  Future<void> stop({bool closeController = true}) async {
-    packets.clear();
-    notifyListeners();
-
-    // 1. Cerrar todos los clientes
+  Future<void> stop() async {
+    // Cerrar clientes
     for (var client in _activeClients.values) {
       client.destroy();
     }
     _activeClients.clear();
+    packets.clear();
 
-    // 2. Cierre del Servidor (IMPORTANTE: Esto detiene la emisión de _handleNewConnection)
-    try {
-      await _server?.close();
-      _server = null;
-    } catch (e) {
-      debugPrint("Error cerrando servidor: $e");
-    }
-
-    // 3. Cierre del StreamController (Solo si se requiere y no está cerrado)
-    if (closeController && !_connectionController.isClosed) {
-      await _connectionController.close();
-    }
-
-    debugPrint('🚪 Servidor TCP cerrado.');
+    await _server?.close();
+    _server = null;
+    debugPrint('🛑 Servidor TCP detenido');
   }
 }

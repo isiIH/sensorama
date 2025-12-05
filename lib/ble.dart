@@ -334,9 +334,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
 
       await Future.delayed(const Duration(seconds: 15));
     } catch (e) {
-      if (mounted) {
-        if (mounted) _showSnackBar('Scan failed: $e', isError: true);
-      }
+      if (mounted) _showSnackBar('Scan failed: $e', isError: true);
     } finally {
       if (mounted) {
         setState(() => _isScanning = false);
@@ -392,13 +390,11 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
       String password, String host, int port, String protocol) async {
     if (!mounted) return;
 
-    await sendBLEConfig(device, ssid, password, host, port, protocol);
-
     StreamSubscription? connectionSubscription;
+    final connectionCompleter = Completer<bool>();
 
     try {
       // Espera de conexión
-      final connectionCompleter = Completer<bool>();
       if (protocol.toUpperCase() == 'TCP') {
         connectionSubscription = TCPConn().onClientConnected.listen((socket) {
           if (!connectionCompleter.isCompleted) {
@@ -412,6 +408,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
           }
         });
       }
+
+      await sendBLEConfig(device, ssid, password, host, port, protocol);
 
       await connectionCompleter.future.timeout(
         const Duration(seconds: 30),
@@ -460,6 +458,22 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
               mainAxisSize: MainAxisSize.min,
               spacing: 10,
               children: [
+                DropdownButtonFormField<String>(
+                  initialValue: selectedProtocol,
+                  items: const [
+                    DropdownMenuItem(value: 'TCP', child: Text('TCP')),
+                    DropdownMenuItem(value: 'UDP', child: Text('UDP')),
+                  ],
+                  onChanged: (value) {
+                    setDialogState(() {
+                      selectedProtocol = value ?? 'TCP';
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    labelText: 'Protocol',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
                 TextField(
                   controller: hostController,
                   decoration: const InputDecoration(
@@ -539,6 +553,22 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
               mainAxisSize: MainAxisSize.min,
               spacing: 10,
               children: [
+                DropdownButtonFormField<String>(
+                  initialValue: selectedProtocol,
+                  items: const [
+                    DropdownMenuItem(value: 'TCP', child: Text('TCP')),
+                    DropdownMenuItem(value: 'UDP', child: Text('UDP')),
+                  ],
+                  onChanged: (value) {
+                    setDialogState(() {
+                      selectedProtocol = value ?? 'TCP';
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    labelText: 'Protocol',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
                 TextField(
                   controller: hostController,
                   decoration: const InputDecoration(

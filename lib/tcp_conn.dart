@@ -63,7 +63,7 @@ class TCPConn extends ChangeNotifier {
 
     // 1. Registramos cliente y NOTIFICAMOS INMEDIATAMENTE
     _activeClients[clientAddress] = client;
-    _connectionController.add(client); // <--- ESTO DESBLOQUEA TU UI EN BLE.DART
+    _connectionController.add(client);
 
     // 2. Preparamos buffer para este cliente
     final BytesBuilder socketBuffer = BytesBuilder();
@@ -135,7 +135,6 @@ class TCPConn extends ChangeNotifier {
   /// Decodifica un paquete binario VALIDADO y COMPLETO
   void _decodePacket(Socket client, Uint8List bytes, int nSamples, int mDims) {
     try {
-      print("active clients: ${_activeClients.length}");
       final buffer = ByteData.sublistView(bytes);
       int readPtr = 0;
 

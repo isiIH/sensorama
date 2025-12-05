@@ -290,7 +290,11 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
       if (!granted) return;
     }
 
+    if (!mounted) return;
+
     bool bleEnabled = await checkBluetoothStatus();
+
+    if (!mounted) return;
     if (!bleEnabled) {
       if (mounted) _showSnackBar('Bluetooth is disabled', isError: true);
       return;

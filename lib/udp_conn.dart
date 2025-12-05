@@ -46,7 +46,7 @@ class UDPConn extends ChangeNotifier {
       final remoteAddress = datagram.address.address;
       final remotePort = datagram.port;
 
-
+      _registerClient(remoteAddress, remotePort);
 
       // --- PROCESAMIENTO BINARIO ---
       if (data.length < _headerSize) {
@@ -61,15 +61,9 @@ class UDPConn extends ChangeNotifier {
         // 2. Crear el objeto SensorPacket usando el factory existente
         final newPacket = SensorPacket.fromJson(reconstructedJson);
         packets.add(newPacket);
-
         notifyListeners();
 
-        if (!_activeClients.containsKey(newPacket.sensorId)) {
-          _registerClient(newPacket.sensorId, remoteAddress, remotePort);
-        }
-
-        // Log ligero para no saturar consola
-        // print('✅ Packet: ${newPacket.sensorId} [${newPacket.data.length} samples]');
+        debugPrint('✅ Packet: ${newPacket.sensorId} [${newPacket.data.length} samples]');
       } catch (e) {
         debugPrint('❌ Error decodificando binario: $e');
       }
@@ -166,17 +160,17 @@ class UDPConn extends ChangeNotifier {
     };
   }
 
-  void _registerClient(String sensorId, String remoteAddress, int remotePort) {
-    if (!_activeClients.containsKey(sensorId)) {
-      _activeClients[sensorId] = {
-        'address': remoteAddress,
+  void _registerClient(String remoteAddress, int remotePort) {
+    if (!_activeClients.containsKey(remoteAddress)) {
+      _activeClients[remoteAddress] = {
         'port': remotePort,
         'lastSeen': DateTime.now(),
       };
-      _connectionController.add(sensorId);
+      _connectionController.add(remoteAddress);
+      debugPrint('Sensor conectado desde $remoteAddress:$remotePort');
+    } else {
+      _activeClients[remoteAddress]?['lastSeen'] = DateTime.now();
     }
-    _activeClients[sensorId]?['lastSeen'] = DateTime.now();
-    debugPrint('Sensor conectado desde $remoteAddress:$remotePort');
   }
 
   void stop() {

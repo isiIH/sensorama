@@ -30,7 +30,7 @@ class TCPConn extends ChangeNotifier {
   // Constantes de decodificación
   static const double _scalar = 100.0;
   // Tamaño fijo del encabezado según tu protocolo C++ (Header struct)
-  static const int _headerSize = 21; 
+  static const int _headerSize = 25; 
   
   // StreamController para notificar conexiones a la UI
   final _connectionController = StreamController<Socket>.broadcast();
@@ -143,16 +143,15 @@ class TCPConn extends ChangeNotifier {
       readPtr += 2;
       // M Dims (1)
       readPtr += 1;
-      // Timestamp Base (4)
-      int tsBaseMs = buffer.getInt32(readPtr, Endian.little);
-      readPtr += 4;
+      // Timestamp Base (8)
+      int tsBaseUs = buffer.getInt64(readPtr, Endian.little);
+      readPtr += 8;
       // Sensor Name (6)
       String sensorId = String.fromCharCodes(bytes.sublist(readPtr, readPtr + 6)).trim();
       readPtr += 6;
 
       // --- 2. DATA ---
       double intervalUs = 1000000.0 / freq;
-      int tsBaseUs = tsBaseMs * 1000;
       List<List<dynamic>> reconstructedData = [];
 
       for (int i = 0; i < nSamples; i++) {

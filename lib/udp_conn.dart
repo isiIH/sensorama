@@ -21,7 +21,7 @@ class UDPConn extends ChangeNotifier {
 
   // Constantes de decodificación (Deben coincidir con C++)
   static const double _scalar = 100.0; 
-  static const int _headerSize = 29;
+  static const int _headerSize = 25;
 
   final _connectionController = StreamController<String>.broadcast();
   Stream<String> get onClientConnected => _connectionController.stream;
@@ -119,8 +119,8 @@ class UDPConn extends ChangeNotifier {
     offset += 1;
 
     // Timestamp Base (Int32) - Viene en ms desde el C++
-    int tsBaseMs = buffer.getInt32(offset, Endian.little);
-    offset += 4;
+    int tsBaseUs = buffer.getInt64(offset, Endian.little);
+    offset += 8;
 
     // Sensor Name (Char[6])
     String sensorId = String.fromCharCodes(bytes.sublist(offset, offset + 6)).trim();
@@ -131,11 +131,6 @@ class UDPConn extends ChangeNotifier {
     // Calculamos el intervalo en microsegundos para interpolar el tiempo
     // Intervalo = 1,000,000 us / Freq
     double intervalUs = 1000000.0 / freq;
-
-    print(tsBaseMs);
-    
-    // Convertimos la base a microsegundos para mantener compatibilidad con el formato original
-    int tsBaseUs = tsBaseMs * 1000; 
 
     List<List<dynamic>> reconstructedData = [];
 

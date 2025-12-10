@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'tcp_conn.dart';
 import 'udp_conn.dart';
+import 'ble_conn.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:network_info_plus/network_info_plus.dart';
@@ -194,12 +195,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       BluetoothCharacteristic getChar(Guid uuid) =>
           targetService.characteristics.firstWhere((c) => c.uuid == uuid);
 
-      // Escritura de credenciales
-      await getChar(charSSIDUUID).write(utf8.encode(ssid), withoutResponse: false);
-      await getChar(charPassUUID).write(utf8.encode(password), withoutResponse: false);
-      await getChar(charConfigUUID).write(utf8.encode("$host:$port"), withoutResponse: false);
+      // Especial para BLE: no enviar credenciales WiFi
+      if (protocol.toUpperCase() != 'BLE') {
+        // Escritura de credenciales (solo para TCP/UDP)
+        await getChar(charSSIDUUID).write(utf8.encode(ssid), withoutResponse: false);
+        await getChar(charPassUUID).write(utf8.encode(password), withoutResponse: false);
+        await getChar(charConfigUUID).write(utf8.encode("$host:$port"), withoutResponse: false);
+      }
       
-      // Escribir el protocolo (TCP o UDP)
+      // Escribir el protocolo (TCP, UDP o BLE)
       await getChar(charProtoUUID).write(utf8.encode(protocol), withoutResponse: false);
       
       await getChar(charActionUUID).write(utf8.encode("SAVE"), withoutResponse: false);
@@ -210,7 +214,10 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         );
       }
 
-      await device.disconnect();
+      // Para BLE, mantener la conexión. Para TCP/UDP, desconectar y esperar conexión de red.
+      if (protocol.toUpperCase() != 'BLE') {
+        await device.disconnect();
+      }
 
       if (!mounted) return;
 
@@ -229,6 +236,41 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
             connectionCompleter.complete(true);
           }
         });
+      } else if (protocol.toUpperCase() == 'BLE') {
+        try {
+          final bleConn = BLEConn();
+          
+          print("Configuración BLE enviada. Esperando reinicio del ESP32...");
+          
+          // NOTA: No hacemos device.disconnect() explícito aquí porque el reinicio 
+          // del ESP32 cortará la conexión forzosamente.
+          
+          // Iniciamos el monitoreo persistente sobre ESTE dispositivo específico.
+          // bleConn se encargará de reintentar hasta que el ESP32 vuelva en sí.
+          bleConn.startMonitoring(device); 
+          
+          // Escuchamos el stream de "conexión exitosa" que bleConn emitirá
+          // UNA VEZ que haya reconectado y renegociado el MTU.
+          connectionSubscription = bleConn.onClientConnected.listen((connectedDevice) {
+            print("ESP32 recuperado y transmitiendo datos!");
+            if (!connectionCompleter.isCompleted) {
+              connectionCompleter.complete(true);
+            }
+          });
+          
+          // (Opcional) Timeout de seguridad: Si en 40s no vuelve, lanzamos error
+          Timer(Duration(seconds: 40), () {
+             if (!connectionCompleter.isCompleted) {
+                bleConn.disconnect();
+                connectionCompleter.completeError("Timeout: El dispositivo BLE no regresó tras el reinicio.");
+             }
+          });
+
+        } catch (e) {
+          if (!connectionCompleter.isCompleted) {
+            connectionCompleter.completeError(e);
+          }
+        }
       }
 
       await connectionCompleter.future.timeout(
@@ -283,6 +325,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                   items: const [
                     DropdownMenuItem(value: 'TCP', child: Text('TCP')),
                     DropdownMenuItem(value: 'UDP', child: Text('UDP')),
+                    DropdownMenuItem(value: 'BLE', child: Text('BLE')),
                   ],
                   onChanged: (value) {
                     setDialogState(() {
@@ -294,40 +337,67 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                     border: OutlineInputBorder(),
                   ),
                 ),
-                TextField(
-                  controller: hostController,
-                  decoration: const InputDecoration(
-                      labelText: 'Host IP', border: OutlineInputBorder()),
-                ),
-                TextField(
-                  controller: portController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                      labelText: 'Port', border: OutlineInputBorder()),
-                ),
-                TextField(
-                  controller: ssidController,
-                  decoration: const InputDecoration(
-                      labelText: 'SSID (WiFi Name)', border: OutlineInputBorder()),
-                ),
-                TextField(
-                  controller: passController,
-                  obscureText: !_passwordVisible,
-                  decoration: InputDecoration(
-                    labelText: 'WiFi Password',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: IconButton(
-                      icon: Icon(_passwordVisible
-                          ? Icons.visibility
-                          : Icons.visibility_off),
-                      onPressed: () {
-                        setDialogState(() {
-                          _passwordVisible = !_passwordVisible;
-                        });
-                      },
+                // Mostrar campos solo si no es BLE
+                if (selectedProtocol != 'BLE') ...[
+                  TextField(
+                    controller: hostController,
+                    decoration: const InputDecoration(
+                        labelText: 'Host IP', border: OutlineInputBorder()),
+                  ),
+                  TextField(
+                    controller: portController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                        labelText: 'Port', border: OutlineInputBorder()),
+                  ),
+                  TextField(
+                    controller: ssidController,
+                    decoration: const InputDecoration(
+                        labelText: 'SSID (WiFi Name)', border: OutlineInputBorder()),
+                  ),
+                  TextField(
+                    controller: passController,
+                    obscureText: !_passwordVisible,
+                    decoration: InputDecoration(
+                      labelText: 'WiFi Password',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        icon: Icon(_passwordVisible
+                            ? Icons.visibility
+                            : Icons.visibility_off),
+                        onPressed: () {
+                          setDialogState(() {
+                            _passwordVisible = !_passwordVisible;
+                          });
+                        },
+                      ),
                     ),
                   ),
-                ),
+                ] else ...[
+                  // Para BLE, mostrar información de estado
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue),
+                    ),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'BLE Direct Connection',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          'Data will be streamed directly via Bluetooth. No WiFi credentials needed.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -337,10 +407,10 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 child: const Text('Cancel')),
             ElevatedButton(
               onPressed: () async {
-                final ssid = ssidController.text;
-                final password = passController.text;
-                final host = hostController.text;
-                final port = int.tryParse(portController.text) ?? _port;
+                final ssid = selectedProtocol == 'BLE' ? '' : ssidController.text;
+                final password = selectedProtocol == 'BLE' ? '' : passController.text;
+                final host = selectedProtocol == 'BLE' ? '' : hostController.text;
+                final port = selectedProtocol == 'BLE' ? 0 : (int.tryParse(portController.text) ?? _port);
 
                 Navigator.of(context).pop();
                 await _provisionDevice(device, ssid, password, host, port, selectedProtocol);
@@ -378,6 +448,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                   items: const [
                     DropdownMenuItem(value: 'TCP', child: Text('TCP')),
                     DropdownMenuItem(value: 'UDP', child: Text('UDP')),
+                    DropdownMenuItem(value: 'BLE', child: Text('BLE')),
                   ],
                   onChanged: (value) {
                     setDialogState(() {
@@ -389,30 +460,32 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                     border: OutlineInputBorder(),
                   ),
                 ),
-                TextField(
-                  controller: hostController,
-                  decoration: const InputDecoration(
-                      labelText: 'Host IP', border: OutlineInputBorder()),
-                ),
-                TextField(
-                  controller: portController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                      labelText: 'Port', border: OutlineInputBorder()),
-                ),
-                TextField(
-                  controller: ssidController,
-                  decoration: const InputDecoration(
-                      labelText: 'SSID (WiFi Name)', border: OutlineInputBorder()),
-                ),
-                TextField(
-                  controller: passController,
-                  obscureText: !_passwordVisible,
-                  decoration: InputDecoration(
-                    labelText: 'WiFi Password',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: IconButton(
-                      icon: Icon(_passwordVisible
+                // Mostrar campos solo si no es BLE
+                if (selectedProtocol != 'BLE') ...[
+                  TextField(
+                    controller: hostController,
+                    decoration: const InputDecoration(
+                        labelText: 'Host IP', border: OutlineInputBorder()),
+                  ),
+                  TextField(
+                    controller: portController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                        labelText: 'Port', border: OutlineInputBorder()),
+                  ),
+                  TextField(
+                    controller: ssidController,
+                    decoration: const InputDecoration(
+                        labelText: 'SSID (WiFi Name)', border: OutlineInputBorder()),
+                  ),
+                  TextField(
+                    controller: passController,
+                    obscureText: !_passwordVisible,
+                    decoration: InputDecoration(
+                      labelText: 'WiFi Password',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        icon: Icon(_passwordVisible
                           ? Icons.visibility
                           : Icons.visibility_off),
                       onPressed: () {
@@ -422,7 +495,32 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                       },
                     ),
                   ),
-                ),
+                  ),
+                ] else ...[
+                  // Para BLE, mostrar información de estado
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue),
+                    ),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'BLE Direct Connection',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          'Data will be streamed directly via Bluetooth. No WiFi credentials needed.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -430,10 +528,10 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
             TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
             ElevatedButton(
               onPressed: () async {
-                final ssid = ssidController.text;
-                final password = passController.text;
-                final host = hostController.text;
-                final port = int.tryParse(portController.text) ?? _port;
+                final ssid = selectedProtocol == 'BLE' ? '' : ssidController.text;
+                final password = selectedProtocol == 'BLE' ? '' : passController.text;
+                final host = selectedProtocol == 'BLE' ? '' : hostController.text;
+                final port = selectedProtocol == 'BLE' ? 0 : (int.tryParse(portController.text) ?? _port);
 
                 Navigator.of(context).pop();
 

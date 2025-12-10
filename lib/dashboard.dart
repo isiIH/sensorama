@@ -402,10 +402,12 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
                   ),
                   leftTitles: AxisTitles(
                     sideTitles: SideTitles(
+                      maxIncluded: false,
+                      minIncluded: false,
                       showTitles: true,
                       reservedSize: 40,
                       getTitlesWidget: (value, meta) => Text(
-                        value.toInt().toString(),
+                        value.toStringAsPrecision(3),
                         style: const TextStyle(color: Colors.white38, fontSize: 10),
                       ),
                     ),
@@ -438,7 +440,7 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
         mainAxisAlignment: MainAxisAlignment.center,
         children: _activeSensors.values.map((stream) {
           // Mostrar la frecuencia original y el ratio aplicado
-          String info = " | ${stream.sensorFrequencyHz}Hz | R:${stream.rawToVisualRatio}";
+          String info = " | ${stream.sensorFrequencyHz} Hz | R:${stream.rawToVisualRatio}";
           bool isSelected = _selectedSensor == stream.id;
 
           return Container(
@@ -474,9 +476,13 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
                           children: [
                             Container(width: 8, height: 8, color: color),
                             const SizedBox(width: 4),
-                            Text("${stream.labels[index]}: ${val.toStringAsFixed(1)}",
+                            Text(stream.labels[index],
                                 style: TextStyle(color: color, fontSize: 11)
                             ),
+                            /*SizedBox(
+                              width: 50,
+                              child: Text(val.toStringAsFixed(1), style: TextStyle(color: color, fontSize: 11)),
+                            ),*/
                           ],
                         ),
                       );

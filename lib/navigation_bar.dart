@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import 'tcp_conn.dart';
-import 'udp_conn.dart';
+import 'protocol/tcp_conn.dart';
+import 'protocol/udp_conn.dart';
 import 'ble.dart';
 import 'dashboard.dart';
 

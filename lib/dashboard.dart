@@ -4,9 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:intl/intl.dart';
-import 'tcp_conn.dart';
-import 'udp_conn.dart';
-import 'sensor_config.dart';
+import 'protocol/tcp_conn.dart';
+import 'protocol/udp_conn.dart';
+import 'protocol/protocol.dart';
 
 // --- CONFIGURACIÓN DE VISUALIZACIÓN GLOBAL ---
 // Tasa de muestreo visual deseada para todos los gráficos (60 puntos/segundo).

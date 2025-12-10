@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'tcp_conn.dart';
-import 'udp_conn.dart';
+import 'protocol/tcp_conn.dart';
+import 'protocol/udp_conn.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:network_info_plus/network_info_plus.dart';
@@ -211,8 +211,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
     final info = NetworkInfo();
     String? wifiName = await info.getWifiName();
     String? ip = await info.getWifiIP();
-
-    ip ??= await getLocalIpAddress();
 
     if (wifiName != null) {
       if (wifiName.startsWith('"') && wifiName.endsWith('"')) {

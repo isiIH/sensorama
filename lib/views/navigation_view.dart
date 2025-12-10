@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 
-import 'protocol/tcp_conn.dart';
-import 'protocol/udp_conn.dart';
-import 'ble.dart';
-import 'dashboard.dart';
+import '../protocol/tcp_conn.dart';
+import '../protocol/udp_conn.dart';
+import 'dashboard_view.dart';
+import 'connection_view.dart';
 
 class NavigationBarScreen extends StatefulWidget {
   const NavigationBarScreen({super.key});

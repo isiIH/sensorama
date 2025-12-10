@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart' hide NavigationBar;
-import 'navigation_bar.dart';
+import 'views/navigation_view.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // ---------------------------------------------------------------------------

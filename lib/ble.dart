@@ -423,7 +423,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Device connected via $protocol!'), backgroundColor: Colors.green),
         );
-        // Aquí podrías agregar el dispositivo a _connectedDevices
       }
 
     } catch (e) {

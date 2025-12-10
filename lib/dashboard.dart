@@ -130,8 +130,8 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     _tcpConn = TCPConn();
     _udpConn = UDPConn();
     // 🔑 El listener ahora reacciona a los cambios de datos Y al estado de conexión
-    _tcpConn.addListener(_onNewSensorData);
-    _udpConn.addListener(_onNewSensorData);
+    _tcpConn.addListener(_onNewSensorDataTCP);
+    _udpConn.addListener(_onNewSensorDataUDP);
     _ticker = createTicker(_onTick);
     _ticker.start();
   }
@@ -139,24 +139,18 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
   @override
   void dispose() {
     _ticker.dispose();
-    _tcpConn.removeListener(_onNewSensorData);
-    _udpConn.removeListener(_onNewSensorData);
+    _tcpConn.removeListener(_onNewSensorDataTCP);
+    _udpConn.removeListener(_onNewSensorDataUDP);
     super.dispose();
   }
 
   // --- PROCESAMIENTO DE PAQUETES DE RED ---
-  void _onNewSensorData() {
-    // Procesar paquetes TCP
-    if (_tcpConn.packets.isNotEmpty) {
-      final SensorPacket packet = _tcpConn.packets.last;
-      _processSensorPacket(packet);
-    }
+  void _onNewSensorDataTCP() {
+    _processSensorPacket(_tcpConn.currentPacket);
+  }
 
-    // Procesar paquetes UDP
-    if (_udpConn.packets.isNotEmpty) {
-      final SensorPacket packet = _udpConn.packets.last;
-      _processSensorPacket(packet);
-    }
+  void _onNewSensorDataUDP() {
+    _processSensorPacket(_udpConn.currentPacket);
   }
 
   void _processSensorPacket(SensorPacket packet) {

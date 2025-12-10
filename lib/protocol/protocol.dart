@@ -19,6 +19,7 @@ class MetricData {
 
 class SensorPacket {
   final String sensorId;
+  final String macAddress;
   final List<MetricData> data;
   final int bufferSize;
   final int f;
@@ -27,6 +28,7 @@ class SensorPacket {
 
   SensorPacket({
     required this.sensorId,
+    required this.macAddress,
     required this.data,
     required this.bufferSize,
     required this.f,
@@ -43,7 +45,8 @@ abstract class Protocol extends ChangeNotifier {
 
   final int port = int.parse(dotenv.env['PORT']!);
   dynamic server;
-  final List<SensorPacket> packets = [];
+  // final ListQueue<SensorPacket> packets = ListQueue();
+  late SensorPacket currentPacket;
 
   final connectionController = StreamController<dynamic>.broadcast();
   Stream<dynamic> get onClientConnected => connectionController.stream;
@@ -143,8 +146,9 @@ abstract class Protocol extends ChangeNotifier {
       offset += 4;
     }
 
-    packets.add(SensorPacket(
+    currentPacket = SensorPacket(
       sensorId: sensorId,
+      macAddress: macAddress,
       data: reconstructedData.map((data) => MetricData(
         values: data[0],
         timestamp: DateTime.fromMicrosecondsSinceEpoch(data[1]),
@@ -153,14 +157,13 @@ abstract class Protocol extends ChangeNotifier {
       f: freq,
       labels: labels,
       units: units
-    ));
+    );
     notifyListeners();
-    debugPrint('✅ Packet: ${packets.last.sensorId} [${packets.last.data.length} samples]');
+    debugPrint('✅ [$type] Packet: ${currentPacket.sensorId} [${currentPacket.data.length} samples]');
   }
 
   /// Cierra el servidor
   Future<void> stop() async {
-    packets.clear();
     server?.close();
     connectionController.close();
     debugPrint('Servidor $type detenido');

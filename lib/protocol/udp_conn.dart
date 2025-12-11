@@ -10,6 +10,7 @@ class UDPConn extends Protocol {
 
   UDPConn._internal() : super('UDP');
 
+
   @override
   void handleConnection(dynamic event) {
     try {
@@ -27,6 +28,7 @@ class UDPConn extends Protocol {
       try {
         // Procesamos el paquete y notificamos
         decodePacket(data);
+        connectionController.add(currentPacket.macAddress);
       } catch (e) {
         debugPrint('❌ Error decodificando binario: $e');
       }

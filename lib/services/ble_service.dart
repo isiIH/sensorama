@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../utils/constants.dart';
@@ -22,14 +22,14 @@ class BleProvisioner {
     final connectionCompleter = Completer<bool>();
 
     try {
-      // 1. Configurar listener del Socket (TCP/UDP) ANTES de enviar credenciales
+      // 1. Configurar listener del Socket (TCP/UDP)
       if (protocol.toUpperCase() == 'TCP') {
-        connectionSubscription = TCPConn().onClientConnected.listen((_) {
-          if (!connectionCompleter.isCompleted) connectionCompleter.complete(true);
+        connectionSubscription = TCPConn().onClientConnected.listen((mac) {
+          if (!connectionCompleter.isCompleted && device.remoteId.toString() == mac) connectionCompleter.complete(true);
         });
       } else {
-        connectionSubscription = UDPConn().onClientConnected.listen((_) {
-          if (!connectionCompleter.isCompleted) connectionCompleter.complete(true);
+        connectionSubscription = UDPConn().onClientConnected.listen((mac) {
+          if (!connectionCompleter.isCompleted && device.remoteId.toString() == mac) connectionCompleter.complete(true);
         });
       }
 

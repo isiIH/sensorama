@@ -48,8 +48,8 @@ abstract class Protocol extends ChangeNotifier {
   // final ListQueue<SensorPacket> packets = ListQueue();
   late SensorPacket currentPacket;
 
-  final connectionController = StreamController<dynamic>.broadcast();
-  Stream<dynamic> get onClientConnected => connectionController.stream;
+  final connectionController = StreamController<String>.broadcast();
+  Stream<String> get onClientConnected => connectionController.stream;
 
   Protocol(this.type);
 

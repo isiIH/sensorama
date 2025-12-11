@@ -18,9 +18,6 @@ class TCPConn extends Protocol {
     final clientAddress = client.remoteAddress.address;
     debugPrint('Nuevo cliente TCP conectado: $clientAddress');
 
-    // Registramos cliente
-    connectionController.add(client);
-
     // Preparamos buffer para este cliente
     final BytesBuilder socketBuffer = BytesBuilder();
 
@@ -63,6 +60,8 @@ class TCPConn extends Protocol {
 
         // Procesamos el paquete y notificamos
         decodePacket(packetBytes);
+
+        connectionController.add(currentPacket.macAddress);
 
         // REMOVEMOS el paquete procesado del buffer
         Uint8List remaining = currentBytes.sublist(totalPacketSize);

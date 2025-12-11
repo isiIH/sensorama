@@ -160,8 +160,10 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
       // Ignorar sensores no seleccionados si hay filtro activo (opcional)
       if (_selectedSensor.isNotEmpty && stream.id != _selectedSensor) continue;
 
-      for (var ring in stream.linesData) {
-        var line = ring.getVisible(visibleThreshold);
+      for (var entry in stream.linesData.indexed) {
+        // Ignorar métricas no seleccionados
+        if (_selectedMetric.isNotEmpty && stream.labels[entry.$1] != _selectedMetric) continue;
+        var line = entry.$2.getVisible(visibleThreshold);
         if (line.isNotEmpty) {
           for (var spot in line) {
             if (spot.x < visibleThreshold) continue;
@@ -202,6 +204,8 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
       if (_selectedSensor != "" && _selectedSensor != stream.id) continue;
 
       for (int i = 0; i < stream.linesData.length; i++) {
+        if (_selectedMetric != "" && _selectedMetric != stream.labels[i]) continue;
+
         allLines.add(LineChartBarData(
           spots: stream.linesData[i].getVisible(minX),
           barWidth: 2,
@@ -218,7 +222,9 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
           SensorLegend(
             activeSensors: _activeSensors,
             selectedSensorId: _selectedSensor,
+            selectedMetricId: _selectedMetric,
             onSensorSelected: (id) => setState(() => _selectedSensor = id),
+            onMetricSelected: (metric) => setState(() => _selectedMetric = metric),
           ),
           const SizedBox(height: 10),
           Expanded(

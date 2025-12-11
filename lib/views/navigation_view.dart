@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../protocol/tcp_conn.dart';
 import '../protocol/udp_conn.dart';
-import 'dashboard_view.dart';
+import 'real_time_chart.dart';
 import 'connection_view.dart';
 
 class NavigationBarScreen extends StatefulWidget {

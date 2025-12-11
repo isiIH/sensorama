@@ -55,7 +55,7 @@ class BleProvisioner {
     // Descubrimiento
     List<BluetoothService> services = await device.discoverServices();
     BluetoothService service = services.firstWhere(
-          (s) => s.uuid == EspUuidConstants.serviceUUID,
+          (s) => s.uuid == AppConstants.serviceUUID,
       orElse: () => throw Exception("Service not found"),
     );
 
@@ -63,11 +63,11 @@ class BleProvisioner {
         service.characteristics.firstWhere((c) => c.uuid == uuid);
 
     // Escritura
-    await getChar(EspUuidConstants.charSSIDUUID).write(utf8.encode(ssid), withoutResponse: false);
-    await getChar(EspUuidConstants.charPassUUID).write(utf8.encode(pass), withoutResponse: false);
-    await getChar(EspUuidConstants.charConfigUUID).write(utf8.encode("$host:$port"), withoutResponse: false);
-    await getChar(EspUuidConstants.charProtoUUID).write(utf8.encode(proto), withoutResponse: false);
-    await getChar(EspUuidConstants.charActionUUID).write(utf8.encode("SAVE"), withoutResponse: false);
+    await getChar(AppConstants.charSSIDUUID).write(utf8.encode(ssid), withoutResponse: false);
+    await getChar(AppConstants.charPassUUID).write(utf8.encode(pass), withoutResponse: false);
+    await getChar(AppConstants.charConfigUUID).write(utf8.encode("$host:$port"), withoutResponse: false);
+    await getChar(AppConstants.charProtoUUID).write(utf8.encode(proto), withoutResponse: false);
+    await getChar(AppConstants.charActionUUID).write(utf8.encode("SAVE"), withoutResponse: false);
 
     // Siempre desconectar el BLE al terminar para liberar recursos
     if(device.isConnected) {

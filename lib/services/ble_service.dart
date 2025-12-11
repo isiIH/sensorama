@@ -35,9 +35,9 @@ class BleProvisioner {
       // 2. Conectar y Escribir por BLE
       await _writeCredentials(device, ssid, password, host, port, protocol);
 
-      // 3. Esperar confirmación del socket (Timeout 30s)
+      // 3. Esperar confirmación del socket (Timeout 15s)
       await connectionCompleter.future.timeout(
-        const Duration(seconds: 30),
+        const Duration(seconds: 15),
         onTimeout: () => throw TimeoutException("$protocol connection timed out."),
       );
 

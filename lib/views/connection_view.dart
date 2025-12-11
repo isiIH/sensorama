@@ -171,7 +171,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   Future<void> _handleProvisioning(List<BluetoothDevice> targets, String ssid, String pass, String host, int port, String protocol) async {
     // UI Feedback
     Navigator.of(context).pop(); // Cerrar diálogo
-    _showSnack('Provisioning ${targets.length} devices...');
+    _buildConnDialog(targets.length);
 
     // Lógica paralela optimizada
     final futures = targets.map((d) => _provisioner.provisionDevice(
@@ -186,19 +186,72 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
 
     if (!mounted) return;
 
+    Navigator.of(context).pop();
+
     if (successCount == targets.length) {
-      _showSnack('All devices connected successfully!', isError: false);
+      _showSnack('Connected successfully!', isError: false);
       setState(() {
         _selectionMode = false;
         _selectedIds.clear();
       });
       _startScan(); // Rescanear
     } else {
-      _showSnack('Finished with errors. Success: $successCount/${targets.length}', isError: true);
+      successCount == 0 ? _showSnack('Connection Error: No devices connected', isError: true) :
+      _showSnack('Connection Error: Connected successfully to $successCount/${targets.length} devices', isError: true);
     }
   }
 
   // --- UI Helpers ---
+
+  void _buildConnDialog(int numDevices) {
+    showDialog(
+      context: context,
+      barrierDismissible: false, // Bloquea la interacción hasta que termine el proceso
+      builder: (BuildContext context) {
+        return Dialog(
+          // 1. Color de Fondo Oscuro: Usamos un color oscuro para el diálogo
+          backgroundColor: Colors.grey[850], // Fondo oscuro casi negro (similar a Dark Mode)
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          elevation: 16,
+          child: Padding(
+            padding: const EdgeInsets.all(28.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // 2. Color del Indicador: Debe destacar en un fondo oscuro
+                const CircularProgressIndicator(
+                  strokeWidth: 4.0,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.cyan), // Color brillante (ej. cian) para contraste
+                ),
+                const SizedBox(height: 30),
+                // 3. Texto Principal: Blanco o gris muy claro
+                Text(
+                  "Provisioning $numDevices device${numDevices > 1 ? 's' : ''}",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white, // Texto blanco para el modo oscuro
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // 4. Texto Secundario: Un gris más claro que el fondo
+                const Text(
+                  "Configuration in progress, please wait.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey, // Gris medio para contraste suave
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
 
   void _showSnack(String msg, {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -210,10 +263,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   void _showConfigDialog({required List<BluetoothDevice> targets}) {
     final ssidCtrl = TextEditingController(text: _wifiName ?? '');
     final passCtrl = TextEditingController();
-    final hostCtrl = TextEditingController(text: _localIp ?? '');
-    final portCtrl = TextEditingController(text: _port.toString());
+    //final hostCtrl = TextEditingController(text: _localIp ?? '');
+    //final portCtrl = TextEditingController(text: _port.toString());
     String proto = 'TCP';
     bool passVisible = false;
+
+    bool isSsidEmpty = ssidCtrl.text.isEmpty;
+    bool ssidEnabled = isSsidEmpty;
+    bool isPassEmpty = passCtrl.text.isEmpty;
 
     showDialog(
       context: context,
@@ -234,17 +291,23 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
                   decoration: const InputDecoration(labelText: 'Protocol'),
                 ),
                 const SizedBox(height: 10),
-                TextField(controller: hostCtrl, decoration: const InputDecoration(labelText: 'Host IP')),
-                const SizedBox(height: 10),
-                TextField(controller: portCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Port')),
-                const SizedBox(height: 10),
-                TextField(controller: ssidCtrl, decoration: const InputDecoration(labelText: 'Wifi SSID')),
+                //TextField(controller: hostCtrl, decoration: const InputDecoration(labelText: 'Host IP'), enabled: false),
+                //const SizedBox(height: 10),
+                //TextField(controller: portCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Port'), enabled: false),
+                //const SizedBox(height: 10),
+                TextField(controller: ssidCtrl,
+                  decoration: InputDecoration(labelText: 'Wifi SSID', errorText: isSsidEmpty ? "SSID can't be empty" : null),
+                  onChanged: (val) => setDialogState(() => isSsidEmpty = val.isEmpty),
+                  enabled: ssidEnabled,
+                ),
                 const SizedBox(height: 10),
                 TextField(
                   controller: passCtrl,
                   obscureText: !passVisible,
+                  onChanged: (val) => setDialogState(() => isPassEmpty = val.isEmpty),
                   decoration: InputDecoration(
                       labelText: 'Wifi Password',
+                      errorText: isPassEmpty ? "Password can't be empty" : null,
                       suffixIcon: IconButton(
                         icon: Icon(passVisible ? Icons.visibility : Icons.visibility_off),
                         onPressed: () => setDialogState(() => passVisible = !passVisible),
@@ -264,12 +327,13 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
               }, child: const Text('Cancel')),
             ElevatedButton(
               onPressed: () {
+                if(isSsidEmpty || isPassEmpty) return;
                 _handleProvisioning(
                     targets,
                     ssidCtrl.text,
                     passCtrl.text,
-                    hostCtrl.text,
-                    int.tryParse(portCtrl.text) ?? _port,
+                    _localIp != null ? _localIp! : '',
+                    _port,
                     proto
                 );
               },

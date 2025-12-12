@@ -13,6 +13,7 @@ import 'sensor_legend.dart';
 // Imports de protocols
 import '../protocol/tcp_conn.dart';
 import '../protocol/udp_conn.dart';
+import '../protocol/ble_conn.dart';
 
 class RealTimeChart extends StatefulWidget {
   const RealTimeChart({super.key});
@@ -24,6 +25,7 @@ class RealTimeChart extends StatefulWidget {
 class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProviderStateMixin {
   late final TCPConn _tcpConn;
   late final UDPConn _udpConn;
+  late final BLEConn _bleConn;
   late final Ticker _ticker;
 
   final Map<String, SensorStream> _activeSensors = {};
@@ -45,9 +47,11 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     super.initState();
     _tcpConn = TCPConn();
     _udpConn = UDPConn();
+    _bleConn = BLEConn();
 
     _tcpConn.addListener(_onNewSensorDataTCP);
     _udpConn.addListener(_onNewSensorDataUDP);
+    _bleConn.addListener(_onNewSensorDataBLE);
 
     _ticker = createTicker(_onTick);
     _ticker.start();
@@ -58,11 +62,13 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     _ticker.dispose();
     _tcpConn.removeListener(_onNewSensorDataTCP);
     _udpConn.removeListener(_onNewSensorDataUDP);
+    _bleConn.removeListener(_onNewSensorDataBLE);
     super.dispose();
   }
 
   void _onNewSensorDataTCP() => _processSensorPacket(_tcpConn.currentPacket);
   void _onNewSensorDataUDP() => _processSensorPacket(_udpConn.currentPacket);
+  void _onNewSensorDataBLE() => _processSensorPacket(_bleConn.currentPacket);
 
   void _processSensorPacket(SensorPacket packet) {
     _globalStartTime ??= packet.data.first.timestamp;

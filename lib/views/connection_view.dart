@@ -286,34 +286,61 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
                   items: const [
                     DropdownMenuItem(value: 'TCP', child: Text('TCP')),
                     DropdownMenuItem(value: 'UDP', child: Text('UDP')),
+                    DropdownMenuItem(value: 'BLE', child: Text('BLE')),
                   ],
                   onChanged: (v) => setDialogState(() => proto = v!),
                   decoration: const InputDecoration(labelText: 'Protocol'),
                 ),
                 const SizedBox(height: 10),
-                //TextField(controller: hostCtrl, decoration: const InputDecoration(labelText: 'Host IP'), enabled: false),
-                //const SizedBox(height: 10),
-                //TextField(controller: portCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Port'), enabled: false),
-                //const SizedBox(height: 10),
-                TextField(controller: ssidCtrl,
-                  decoration: InputDecoration(labelText: 'Wifi SSID', errorText: isSsidEmpty ? "SSID can't be empty" : null),
-                  onChanged: (val) => setDialogState(() => isSsidEmpty = val.isEmpty),
-                  enabled: ssidEnabled,
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: passCtrl,
-                  obscureText: !passVisible,
-                  onChanged: (val) => setDialogState(() => isPassEmpty = val.isEmpty),
-                  decoration: InputDecoration(
-                      labelText: 'Wifi Password',
-                      errorText: isPassEmpty ? "Password can't be empty" : null,
-                      suffixIcon: IconButton(
-                        icon: Icon(passVisible ? Icons.visibility : Icons.visibility_off),
-                        onPressed: () => setDialogState(() => passVisible = !passVisible),
-                      )
+                if(proto != 'BLE') ...[
+                  //TextField(controller: hostCtrl, decoration: const InputDecoration(labelText: 'Host IP'), enabled: false),
+                  //const SizedBox(height: 10),
+                  //TextField(controller: portCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Port'), enabled: false),
+                  //const SizedBox(height: 10),
+                  TextField(controller: ssidCtrl,
+                    decoration: InputDecoration(labelText: 'Wifi SSID', errorText: isSsidEmpty ? "SSID can't be empty" : null),
+                    onChanged: (val) => setDialogState(() => isSsidEmpty = val.isEmpty),
+                    enabled: ssidEnabled,
                   ),
-                ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: passCtrl,
+                    obscureText: !passVisible,
+                    onChanged: (val) => setDialogState(() => isPassEmpty = val.isEmpty),
+                    decoration: InputDecoration(
+                        labelText: 'Wifi Password',
+                        errorText: isPassEmpty ? "Password can't be empty" : null,
+                        suffixIcon: IconButton(
+                          icon: Icon(passVisible ? Icons.visibility : Icons.visibility_off),
+                          onPressed: () => setDialogState(() => passVisible = !passVisible),
+                        )
+                    ),
+                  ),
+                ] else ...[
+                  // Para BLE, mostrar información de estado
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue),
+                    ),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'BLE Direct Connection',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          'Data will be streamed directly via Bluetooth. No WiFi credentials needed.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -327,7 +354,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
               }, child: const Text('Cancel')),
             ElevatedButton(
               onPressed: () {
-                if(isSsidEmpty || isPassEmpty) return;
+                if(proto != 'BLE' && (isSsidEmpty || isPassEmpty)) return;
                 _handleProvisioning(
                     targets,
                     ssidCtrl.text,

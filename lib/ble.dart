@@ -238,9 +238,22 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         });
       } else if (protocol.toUpperCase() == 'BLE') {
         try {
-          final bleConn = BLEConn();
+
+          // 1. BARRERA DE ESPERA: Bloqueamos hasta detectar la desconexión física.
+          // Esto garantiza que no empezamos a buscar algo que todavía "creemos" tener conectado.
+          // Ponemos un timeout por si acaso la placa se congela y no se reinicia.
+          await device.connectionState
+              .firstWhere((state) => state == BluetoothConnectionState.disconnected)
+              .timeout(Duration(seconds: 10));
+
+          print("📉 Desconexión detectada. El ESP32 se está reiniciando.");
           
-          print("Configuración BLE enviada. Esperando reinicio del ESP32...");
+          // 2. BUFFER DE SEGURIDAD (Opcional pero recomendado):
+          // Damos 1 o 2 segundos extra para que el stack Bluetooth de Android/iOS 
+          // limpie la caché interna y entienda que el dispositivo se fue.
+          await Future.delayed(Duration(seconds: 2));
+
+          final bleConn = BLEConn();
           
           // NOTA: No hacemos device.disconnect() explícito aquí porque el reinicio 
           // del ESP32 cortará la conexión forzosamente.

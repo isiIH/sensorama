@@ -20,7 +20,7 @@ class BLEConn extends ChangeNotifier {
   StreamSubscription? _connectionStateSubscription;
 
   // UUIDs - Deben coincidir con la config del ESP32
-  final Guid serviceUUID = Guid("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+  final Guid serviceUUID = Guid("e0277977-85ca-4ea2-8b83-82a1789c1048");
   final Guid charDataUUID = Guid("beb5483f-36e1-4688-b7f5-ea07361b26a9");
 
   // Lista de paquetes procesados listos para la UI
@@ -125,7 +125,18 @@ class BLEConn extends ChangeNotifier {
       }
 
       if (targetService == null) {
-        throw Exception("Servicio UUID no encontrado. ¿La placa terminó de iniciar?");
+        // Si conectamos, pero no tiene el servicio de datos, es porque
+        // la placa reinició en modo Aprovisionamiento.
+        print("⛔ Dispositivo en modo incorrecto (¿Aprovisionamiento?). Abortando persistencia.");
+        
+        // Marcamos desconexión intencional para que el listener NO reinicie el loop
+        _intentionalDisconnect = true; 
+        
+        // Limpiamos todo
+        stop(); 
+        
+        // Opcional: Lanzar error específico si necesitas notificar a la UI
+        throw Exception("ABORT_PERSISTENCE: Modo incorrecto");
       }
 
       // 3. Obtener Característica

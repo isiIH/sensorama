@@ -18,89 +18,114 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   // Services
   final _permissionService = PermissionService();
   final _networkService = NetworkService();
-  final _provisioner = BleProvisioner();
+  final _bleService = BleService();
 
   // State
   String? _localIp;
   String? _wifiName;
   final int _port = int.parse(dotenv.env['PORT']!);
   bool _permissionsGranted = false;
-  bool _isScanning = false;
 
   // Data
-  final List<BluetoothDevice> _devices = [];
   final Set<String> _selectedIds = {};
-  bool _selectionMode = false;
-  bool _isCheckingPermissions = true;
-
-  // Streams
-  StreamSubscription? _scanSub;
-  StreamSubscription? _netSub;
+  bool get _selectionMode => _selectedIds.isNotEmpty;
+  bool _isScanning = true;
+  late bool _isCheckingPermissions = true;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    FlutterBluePlus.isScanning.listen((state) {
+      if (mounted) {
+        setState(() => _isScanning = state);
+      }
+    });
+
     _initSequence();
   }
 
   @override
-  void dispose() {
+  Future<void> dispose() async {
     WidgetsBinding.instance.removeObserver(this);
-    _scanSub?.cancel();
-    _netSub?.cancel();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _checkPermissionsSilent(); // Re-chequear al volver de Settings
+      if (!_permissionsGranted) {
+        _checkPermissionsSilent();
+      }
     }
   }
 
-  // --- Lógica de Inicio ---
+// --- Lógica de Inicio (Reestructurada) ---
 
   Future<void> _initSequence() async {
+    // 1. Chequeo inicial
     bool granted = await _permissionService.checkPermissionsStatus();
-    if (!granted) {
-      granted = await _permissionService.requestPermissions();
-    }
 
-    if (mounted) {
-      setState(() {
-        _isCheckingPermissions = false;
-        _permissionsGranted = granted;
-      });
-      if (granted) {
-        _startNetworkListener();
-        _startScan();
+    if (granted) {
+      if (mounted) {
+        setState(() {
+          _isCheckingPermissions = false;
+          _permissionsGranted = granted;
+        });
       }
+      // Si están concedidos, procedemos con la lógica principal
+      _initializeServices();
+    } else {
+      // 2. Si no están concedidos, pedirlos
+      final requestResult = await _permissionService.requestPermissions();
+
+      if (mounted) {
+        setState(() {
+          _isCheckingPermissions = false;
+          _permissionsGranted = requestResult;
+        });
+      }
+
+      if (requestResult) {
+        // Si se conceden después de la solicitud, inicializar servicios
+        _initializeServices();
+      }
+      // Si no se conceden, la UI mostrará el mensaje de 'Permissions Required'
     }
   }
 
   Future<void> _checkPermissionsSilent() async {
-    bool granted = await _permissionService.checkPermissionsStatus();
+    // Lógica para re-chequear permisos al volver de Settings
+    final granted = await _permissionService.checkPermissionsStatus();
+
+    // Solo hacemos algo si el resultado es diferente al estado actual
     if (granted != _permissionsGranted && mounted) {
       setState(() => _permissionsGranted = granted);
+
       if (granted) {
-        _startNetworkListener();
-        _startScan();
+        // Si los permisos fueron concedidos, iniciamos los servicios
+        _initializeServices();
       }
     }
   }
 
-  // --- Red ---
-
-  void _startNetworkListener() {
-    _netSub = _networkService.onConnectivityChanged.listen((_) async {
-      await Future.delayed(const Duration(seconds: 2)); // Wait for IP assignment
-      if(mounted) _refreshNetworkInfo();
-    });
-    _refreshNetworkInfo();
+  void _initializeServices() {
+    _updateNetworkInfo(); // Llamada renombrada a _updateNetworkInfo
+    _startScan(); // Esto llama al servicio BLE para comenzar
   }
 
-  Future<void> _refreshNetworkInfo() async {
+  // --- Red ---
+
+  void _updateNetworkInfo() {
+    _networkService.onConnectivityChanged.listen((_) async {
+      await Future.delayed(const Duration(seconds: 2)); // Wait for IP assignment
+      if(mounted) _fetchNetworkData();
+    });
+    _fetchNetworkData();
+  }
+
+  Future<void> _fetchNetworkData() async {
     final info = await _networkService.getCurrentNetworkInfo();
     if (mounted) {
       setState(() {
@@ -110,100 +135,46 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
     }
   }
 
-  // --- Bluetooth Scanning ---
+  // --- Provisioning Handlers ---
 
   Future<void> _startScan() async {
-    if (_isScanning) return;
-
-    // Verificar estado del adaptador
-    if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
-      try {
-        await FlutterBluePlus.turnOn();
-      } catch (e) {
-        if(mounted) _showSnack('Bluetooth is off', isError: true);
-        return;
-      }
-    }
-
-    if (mounted) {
-      setState(() {
-        _isScanning = true;
-        _devices.clear();
-      });
-    }
-
     try {
-      await _scanSub?.cancel();
-
-      // Escucha de resultados
-      _scanSub = FlutterBluePlus.scanResults.listen((results) {
-        if (!mounted) return;
-        for (final r in results) {
-          // Filtrado optimizado
-          if (r.device.platformName.toLowerCase().startsWith('sensor-')) {
-            _addDevice(r.device);
-          }
-        }
-      });
-
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
-
-      // Wait for scan to complete naturally via library or timeout
-      await Future.delayed(const Duration(seconds: 15));
-
+      setState(() => _selectedIds.clear());
+      await _bleService.startScan();
     } catch (e) {
-      if(mounted) _showSnack('Scan Error: $e', isError: true);
-    } finally {
-      if (mounted) setState(() => _isScanning = false);
+      if(mounted) _showSnack('Error scanning devices: $e', isError: true);
     }
   }
-
-  void _addDevice(BluetoothDevice device) {
-    if (!_devices.any((d) => d.remoteId == device.remoteId)) {
-      setState(() {
-        _devices.add(device);
-      });
-    }
-  }
-
-  // --- Provisioning Handlers ---
 
   Future<void> _handleProvisioning(List<BluetoothDevice> targets, String ssid, String pass, String host, int port, String protocol) async {
     // UI Feedback
     Navigator.of(context).pop(); // Cerrar diálogo
-    _buildConnDialog(targets.length);
+    _showProcessingDialog(targets.length); // Loading
 
-    // Lógica paralela optimizada
-    final futures = targets.map((d) => _provisioner.provisionDevice(
-        device: d, ssid: ssid, password: pass, host: host, port: port, protocol: protocol
-    ).then((_) => true).catchError((e) {
-      debugPrint("Error on ${d.platformName}: $e");
-      return false;
-    }));
-
-    final results = await Future.wait(futures);
-    final successCount = results.where((r) => r).length;
+    final successCount = await _bleService.provisionBatch(
+        devices: targets,
+        ssid: ssid,
+        password: pass,
+        host: host,
+        port: port,
+        protocol: protocol
+    );
 
     if (!mounted) return;
-
-    Navigator.of(context).pop();
+    Navigator.pop(context); // Cerrar loading dialog
 
     if (successCount == targets.length) {
-      _showSnack('Connected successfully!', isError: false);
-      setState(() {
-        _selectionMode = false;
-        _selectedIds.clear();
-      });
-      _startScan(); // Rescanear
+      _showSnack('Connected successfully!');
+      setState(() => _selectedIds.clear());
+      _startScan(); // Rescanear para ver si desaparecen o cambian estado
     } else {
-      successCount == 0 ? _showSnack('Connection Error: No devices connected', isError: true) :
-      _showSnack('Connection Error: Connected successfully to $successCount/${targets.length} devices', isError: true);
+      _showSnack('Finished: $successCount/${targets.length} connected.', isError: successCount == 0);
     }
   }
 
   // --- UI Helpers ---
 
-  void _buildConnDialog(int numDevices) {
+  void _showProcessingDialog(int numDevices) {
     showDialog(
       context: context,
       barrierDismissible: false, // Bloquea la interacción hasta que termine el proceso
@@ -263,8 +234,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   void _showConfigDialog({required List<BluetoothDevice> targets}) {
     final ssidCtrl = TextEditingController(text: _wifiName ?? '');
     final passCtrl = TextEditingController();
-    //final hostCtrl = TextEditingController(text: _localIp ?? '');
-    //final portCtrl = TextEditingController(text: _port.toString());
     String proto = 'TCP';
     bool passVisible = false;
 
@@ -347,7 +316,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
           actions: [
             TextButton(onPressed: () {
                 setState(() {
-                _selectionMode = false;
                 _selectedIds.clear();
                 });
                 Navigator.pop(ctx);
@@ -375,37 +343,10 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
   @override
   Widget build(BuildContext context) {
     // Verificar si está cargando permisos
-    if (_isCheckingPermissions) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (!_permissionsGranted) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text(
-                'Permissions Required',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)
-            ),
-            const SizedBox(height: 8),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 32),
-              child: Text(
-                'We need Bluetooth and Location access to scan for sensors and WiFi info.',
-                textAlign: TextAlign.center,
-              ),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: _permissionService.openSettings,
-              child: const Text('Grant Permissions'),
-            )
-          ],
-        ),
-      );
-    }
+    if (_isCheckingPermissions) return const Center(child: CircularProgressIndicator());
+    if (!_permissionsGranted) return _buildPermissionRequest();
 
-    return Scaffold( // He envuelto en Scaffold para que funcione el SnackBar correctamente si este es el root
+    return Scaffold(
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -427,75 +368,123 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
             const SizedBox(height: 10),
 
             // Header Lista
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                if (_selectionMode)
-                  Checkbox(value: _selectedIds.length == _devices.length,
-                      onChanged: (_) => setState(() {
-                        if (_selectedIds.length == _devices.length) {
-                          _selectedIds.clear();
-                          _selectionMode = false;
-                        } else {
-                          _selectedIds.clear();
-                          for (var d in _devices) {
-                            _selectedIds.add(d.remoteId.str);
-                          }
-                        }
-                    })),
-                Text('Available Sensors',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                IconButton(
-                  onPressed: _isScanning ? null : () => _startScan(),
-                  icon: const Icon(Icons.refresh),
-                  tooltip: 'Rescan',
-                )
-              ],
-            ),
+          Expanded(
+            child: StreamBuilder<List<BluetoothDevice>>(
+            stream: _bleService.scanResults,
+            initialData: _bleService.currentDevices,
+                builder: (context, snapshot) {
+                  final devices = snapshot.data ?? [];
+                  return Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          if (_selectionMode)
+                            Checkbox(value: _selectedIds.length == devices.length,
+                                onChanged: (_) => setState(() {
+                                  if (_selectedIds.length == devices.length) {
+                                    _selectedIds.clear();
+                                  } else {
+                                    _selectedIds.clear();
+                                    for (var d in devices) {
+                                      _selectedIds.add(d.remoteId.str);
+                                    }
+                                  }
+                              })),
+                          Text('Available Devices',
+                              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                          IconButton(
+                            onPressed: _isScanning ? null : () => _startScan(),
+                            icon: const Icon(Icons.refresh),
+                            tooltip: 'Rescan',
+                          )
+                        ],
+                      ),
+                      const Divider(),
+                      Expanded(child: _buildDeviceList(devices)),
 
-            // Lista
-            Expanded(
-              child: ListView.separated(
-                itemCount: _devices.length,
-                separatorBuilder: (_, __) => const Divider(),
-                itemBuilder: (_, i) {
-                  final dev = _devices[i];
-                  final selected = _selectedIds.contains(dev.remoteId.str);
-                  return ListTile(
-                    title: Text(dev.platformName),
-                    subtitle: Text(dev.remoteId.str),
-                    leading: _selectionMode
-                        ? Checkbox(value: selected, onChanged: (_) => _toggleSelection(dev.remoteId.str))
-                        : const Icon(Icons.bluetooth),
-                    onLongPress: () => _toggleSelection(dev.remoteId.str),
-                    onTap: () {
-                      if(_selectionMode) {
-                        _toggleSelection(dev.remoteId.str);
-                      } else {
-                        _showConfigDialog(targets: [dev]);
-                      }
-                    },
-                  );
-                },
-              ),
-            ),
-
-            // Botón Bulk Action
-            if (_selectionMode)
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  icon: const Icon(Icons.settings_input_antenna),
-                  label: Text('Setup (${_selectedIds.length})'),
-                  onPressed: _selectedIds.isEmpty ? null : () {
-                    final targets = _devices.where((d) => _selectedIds.contains(d.remoteId.str)).toList();
-                    _showConfigDialog(targets: targets);
-                  },
-                ),
-              )
+                      // Botón Bulk Action
+                      if (_selectionMode)
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            icon: const Icon(Icons.settings_input_antenna),
+                            label: Text('Setup (${_selectedIds.length})'),
+                            onPressed: _selectedIds.isEmpty ? null : () {
+                              final targets = devices.where((d) => _selectedIds.contains(d.remoteId.str)).toList();
+                              _showConfigDialog(targets: targets);
+                            },
+                          ),
+                        )
+                    ]);
+            }),
+          ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildPermissionRequest() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Text(
+              'Permissions Required',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)
+          ),
+          const SizedBox(height: 8),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 32),
+            child: Text(
+              'We need Bluetooth and Location access to scan for sensors and WiFi info.',
+              textAlign: TextAlign.center,
+            ),
+          ),
+          const SizedBox(height: 24),
+          ElevatedButton(
+            onPressed: _permissionService.openSettings,
+            child: const Text('Grant Permissions'),
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeviceList(List<BluetoothDevice> devices) {
+    if (_isScanning && devices.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (devices.isEmpty) {
+      return const Center(child: Text("No devices found.\nEnsure they are in pairing mode.", textAlign: TextAlign.center));
+    }
+
+    return ListView.builder(
+      itemCount: devices.length,
+      itemBuilder: (context, index) {
+        final dev = devices[index];
+        final isSelected = _selectedIds.contains(dev.remoteId.str);
+
+        return ListTile(
+          title: Text(dev.platformName.isNotEmpty ? dev.platformName : "Unknown Device"),
+          subtitle: Text(dev.remoteId.str),
+          leading: _selectionMode
+              ? Checkbox(
+              value: isSelected,
+              onChanged: (_) => _toggleSelection(dev.remoteId.str))
+              : const Icon(Icons.bluetooth),
+          onLongPress: () => _toggleSelection(dev.remoteId.str),
+          onTap: () {
+            if (_selectionMode) {
+              _toggleSelection(dev.remoteId.str);
+            } else {
+              _showConfigDialog(targets: [dev]);
+            }
+          },
+        );
+      },
     );
   }
 
@@ -506,7 +495,6 @@ class _ConnectionScreenState extends State<ConnectionScreen> with WidgetsBinding
       } else {
         _selectedIds.add(id);
       }
-      _selectionMode = _selectedIds.isNotEmpty;
     });
   }
 

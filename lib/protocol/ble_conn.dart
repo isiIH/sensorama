@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
@@ -7,13 +6,10 @@ import '../utils/constants.dart';
 import 'protocol.dart';
 
 class BLEConn extends Protocol {
+  // Singleton Pattern
   static final BLEConn _instance = BLEConn._internal();
-
-  factory BLEConn() {
-    return _instance;
-  }
-
-  BLEConn._internal()  : super('BLE');
+  factory BLEConn() => _instance;
+  BLEConn._internal() : super('BLE');
 
   late BluetoothDevice _targetDevice;
   BluetoothCharacteristic? _dataCharacteristic;
@@ -86,18 +82,6 @@ class BLEConn extends Protocol {
   Future<void> _negotiateConnection(BluetoothDevice device) async {
     _isNegotiating = true;
     try {
-      // 1. Negociación MTU (Crítico para velocidad)
-      if (Platform.isAndroid) {
-        try {
-          // Solicitamos 512, Android negociará lo máximo posible (ej. 512 o 247)
-          await Future.delayed(Duration(milliseconds: 3000)); // Pequeña pausa para estabilizar
-          await device.requestMtu(512);
-          debugPrint("⚡ MTU solicitado. Actual: ${await device.mtu.first}");
-        } catch (e) {
-          debugPrint("⚠️ Advertencia MTU: $e");
-        }
-      }
-
       // 2. Descubrir Servicios
       debugPrint("🔍 Descubriendo servicios...");
       List<BluetoothService> services = await device.discoverServices();
@@ -119,8 +103,8 @@ class BLEConn extends Protocol {
         // Marcamos desconexión intencional para que el listener NO reinicie el loop
         _intentionalDisconnect = true; 
         
-        // Limpiamos todo
-        stop(); 
+        // desconectamos
+        disconnect();
         
         // Opcional: Lanzar error específico si necesitas notificar a la UI
         throw Exception("ABORT_PERSISTENCE: Modo incorrecto");
@@ -185,11 +169,5 @@ class BLEConn extends Protocol {
     if (_dataCharacteristic != null) {
        // Opcional: intentar deshabilitar notificaciones antes de cerrar
     }
-  }
-
-  @override
-  Future<void> stop() async {
-    super.stop();
-    disconnect();
   }
 }

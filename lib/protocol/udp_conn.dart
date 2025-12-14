@@ -2,14 +2,10 @@ import 'package:flutter/foundation.dart';
 import 'protocol.dart';
 
 class UDPConn extends Protocol {
+  // Singleton Pattern
   static final UDPConn _instance = UDPConn._internal();
-
-  factory UDPConn() {
-    return _instance;
-  }
-
+  factory UDPConn() => _instance;
   UDPConn._internal() : super('UDP');
-
 
   @override
   void handleConnection(dynamic event) {

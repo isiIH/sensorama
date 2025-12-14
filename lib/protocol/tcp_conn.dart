@@ -4,12 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'protocol.dart';
 
 class TCPConn extends Protocol {
+  // Singleton Pattern
   static final TCPConn _instance = TCPConn._internal();
-
-  factory TCPConn() {
-    return _instance;
-  }
-
+  factory TCPConn() => _instance;
   TCPConn._internal() : super('TCP');
 
   @override

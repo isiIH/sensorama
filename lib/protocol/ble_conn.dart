@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../utils/constants.dart';
 import 'protocol.dart';
@@ -12,7 +13,6 @@ class BLEConn extends Protocol {
   BLEConn._internal() : super('BLE');
 
   late BluetoothDevice _targetDevice;
-  BluetoothCharacteristic? _dataCharacteristic;
   StreamSubscription? _valueChangedSubscription;
   StreamSubscription? _connectionStateSubscription;
 
@@ -20,12 +20,28 @@ class BLEConn extends Protocol {
   bool _intentionalDisconnect = false;
   bool _isNegotiating = false;
 
-  /// 🚀 Punto de entrada: Comienza el ciclo de conexión persistente hacia una MAC específica.
+  static const String _prefLastDeviceId = 'last_ble_device_id';
+
+  /// Llamar al iniciar la app para reconectar automáticamente
+  Future<void> restoreLastConnection() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? lastId = prefs.getString(_prefLastDeviceId);
+
+    if (lastId != null && lastId.isNotEmpty) {
+      debugPrint("💾 Dispositivo guardado encontrado: $lastId. Intentando reconectar...");
+      // En FBP podemos instanciar un dispositivo directamente desde su ID sin escanear
+      final device = BluetoothDevice.fromId(lastId);
+      handleConnection(device);
+    }
+  }
+
+  /// Comienza el ciclo de conexión persistente hacia una MAC específica.
   /// No importa si el dispositivo se está reiniciando, este método lo buscará hasta encontrarlo.
   @override
   void handleConnection(dynamic event) {
     _intentionalDisconnect = false;
     _targetDevice = event;
+    _persistDevice(_targetDevice.remoteId.str); // guardamos el mac en prefs
     
     // Limpiamos subscripciones previas por seguridad
     _cleanupSubscriptions();
@@ -37,12 +53,12 @@ class BLEConn extends Protocol {
       if (state == BluetoothConnectionState.connected) {
         if (!_isNegotiating) {
           debugPrint("✅ Dispositivo conectado a nivel físico. Iniciando negociación lógica...");
-           _negotiateConnection(_targetDevice);
+           _negotiateConnection();
         }
       } else if (state == BluetoothConnectionState.disconnected) {
         if (!_intentionalDisconnect) {
           debugPrint("⚠️ Desconexión detectada (¿Reinicio de ESP32?). Iniciando reconexión...");
-          _reconnectLoop(_targetDevice);
+          _reconnectLoop();
         } else {
           debugPrint("ℹ️ Desconexión intencional completada.");
         }
@@ -50,19 +66,19 @@ class BLEConn extends Protocol {
     });
 
     // Intentamos conectar inmediatamente (o entrar en el loop de reconexión si se está reiniciando)
-    _reconnectLoop(_targetDevice);
+    _reconnectLoop();
   }
 
   /// Bucle recursivo que intenta conectar con el dispositivo específico
-  void _reconnectLoop(BluetoothDevice device) async {
-    if (_intentionalDisconnect || device.isConnected) return;
+  void _reconnectLoop() async {
+    if (_intentionalDisconnect || _targetDevice.isConnected) return;
 
     try {
-      debugPrint("🔄 Buscando dispositivo ${device.remoteId}...");
+      debugPrint("🔄 Buscando dispositivo ${_targetDevice.remoteId}...");
       // Intentamos conectar.
       // timeout: le da tiempo al ESP32 de arrancar.
       // autoConnect: false para que falle (timeout) si no está y podamos reintentar la lógica manualmente.
-      await device.connect(
+      await _targetDevice.connect(
         license: License.free,
         autoConnect: false,
         timeout: Duration(seconds: 4) // Ventana de búsqueda
@@ -73,81 +89,53 @@ class BLEConn extends Protocol {
       if (!_intentionalDisconnect) {
         debugPrint("⏳ Dispositivo no encontrado o reiniciando... reintentando en 1s.");
         // Espera no bloqueante antes de reintentar
-        Future.delayed(Duration(seconds: 1), () => _reconnectLoop(device));
+        Future.delayed(Duration(seconds: 1), () => _reconnectLoop());
       }
     }
-  } 
+  }
 
-  /// Lógica crítica: MTU, Servicios y Suscripciones
-  Future<void> _negotiateConnection(BluetoothDevice device) async {
+  /// Lógica de Servicios y Suscripciones (MTU, Notify)
+  Future<void> _negotiateConnection() async {
     _isNegotiating = true;
+
     try {
-      // 2. Descubrir Servicios
-      debugPrint("🔍 Descubriendo servicios...");
-      List<BluetoothService> services = await device.discoverServices();
-      BluetoothService? targetService;
-      
-      // Buscamos el servicio específico
-      for (final s in services) {
-        if (s.uuid == AppConstants.dataServiceUUID) {
-          targetService = s;
-          break;
-        }
-      }
+      // Descubrir servicios
+      List<BluetoothService> services = await _targetDevice.discoverServices();
 
-      if (targetService == null) {
-        // Si conectamos, pero no tiene el servicio de datos, es porque
-        // la placa reinició en modo Aprovisionamiento.
-        debugPrint("⛔ Dispositivo en modo incorrecto (¿Aprovisionamiento?). Abortando persistencia.");
-        
-        // Marcamos desconexión intencional para que el listener NO reinicie el loop
-        _intentionalDisconnect = true; 
-        
-        // desconectamos
+      // Buscar servicio y característica en una pasada eficiente
+      BluetoothCharacteristic? dataChar;
+
+      try {
+        final service = services.firstWhere((s) => s.uuid == AppConstants.dataServiceUUID);
+        dataChar = service.characteristics.firstWhere((c) => c.uuid == AppConstants.charDataUUID);
+      } catch (e) {
+        // Si no encuentra el servicio o la característica (ej. modo Aprovisionamiento)
+        debugPrint("⛔ Servicio/Característica no encontrados. Abortando persistencia.");
         disconnect();
-        
-        // Opcional: Lanzar error específico si necesitas notificar a la UI
-        throw Exception("ABORT_PERSISTENCE: Modo incorrecto");
+        return;
       }
 
-      // 3. Obtener Característica
-      _dataCharacteristic = null;
-      for (final c in targetService.characteristics) {
-        if (c.uuid == AppConstants.charDataUUID) {
-          _dataCharacteristic = c;
-          break;
+      // Suscribirse
+      if (dataChar.properties.notify) {
+        if (!dataChar.isNotifying) {
+          await dataChar.setNotifyValue(true);
         }
-      }
 
-      if (_dataCharacteristic == null) {
-        throw Exception("Característica de datos no encontrada.");
-      }
-
-      // 4. Suscribirse a notificaciones
-      if (_dataCharacteristic!.properties.notify) {
-        if(!_dataCharacteristic!.isNotifying) {
-             await _dataCharacteristic!.setNotifyValue(true);
-        }
-        
-        // Reiniciamos la suscripción al stream de datos
         _valueChangedSubscription?.cancel();
-        _valueChangedSubscription = _dataCharacteristic!.onValueReceived.listen((value) {
-           if (value.isNotEmpty) {
-             Uint8List data = Uint8List.fromList(value);
-             if (data.length >= Protocol.headerSize) {
-               decodePacket(Uint8List.fromList(value));
-               connectionController.add(currentPacket.macAddress);
-             }
-           }
+        _valueChangedSubscription = dataChar.onValueReceived.listen((value) {
+          if (value.length >= Protocol.headerSize) {
+            // Asumiendo que decodePacket y currentPacket son parte de Protocol o globales
+            decodePacket(Uint8List.fromList(value));
+            // Asumiendo que connectionController existe en la clase padre o global
+            connectionController.add(currentPacket.macAddress);
+          }
         });
-
-        debugPrint('✅ Notificaciones activas. Recibiendo datos...');
+        debugPrint('✅ Flujo de datos activo.');
       }
 
     } catch (e) {
-      debugPrint("❌ Error durante negociación ($e). Reintentando conexión completa...");
-      // Si falla la negociación, desconectamos para forzar el ciclo de reconexión limpio
-      device.disconnect(); 
+      debugPrint("❌ Error negociación: $e. Reiniciando conexión...");
+      _targetDevice.disconnect();
     } finally {
       _isNegotiating = false;
     }
@@ -159,6 +147,10 @@ class BLEConn extends Protocol {
     debugPrint('🛑 Solicitud de desconexión manual.');
     
     _cleanupSubscriptions();
+
+    // Borramos el ID del dispositivo
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_prefLastDeviceId);
     
     await _targetDevice.disconnect();
   }
@@ -166,8 +158,16 @@ class BLEConn extends Protocol {
   void _cleanupSubscriptions() {
     _valueChangedSubscription?.cancel();
     _connectionStateSubscription?.cancel();
-    if (_dataCharacteristic != null) {
-       // Opcional: intentar deshabilitar notificaciones antes de cerrar
-    }
+  }
+
+  Future<void> _persistDevice(String id) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefLastDeviceId, id);
+  }
+
+  @override
+  Future<void> stop() async {
+    _cleanupSubscriptions();
+    super.stop();
   }
 }

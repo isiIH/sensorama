@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../protocol/tcp_conn.dart';
 import '../protocol/udp_conn.dart';
+import '../protocol/ble_conn.dart';
 import 'real_time_chart.dart';
 import 'connection_view.dart';
 
@@ -16,14 +17,17 @@ class _NavigationBarScreenState extends State<NavigationBarScreen> {
   int _selectedIndex = 1; // 0 = BLE Connection, 1 = Graph
   late final TCPConn _tcpServer;
   late final UDPConn _udpServer;
+  late final BLEConn _bleServer;
 
   @override
   void initState() {
     super.initState();
     _tcpServer = TCPConn();
     _udpServer = UDPConn();
+    _bleServer = BLEConn();
     _tcpServer.start();
     _udpServer.start();
+    _bleServer.restoreLastConnection();
   }
 
   @override
@@ -32,6 +36,7 @@ class _NavigationBarScreenState extends State<NavigationBarScreen> {
     super.dispose();
     _tcpServer.stop();
     _udpServer.stop();
+    _bleServer.stop();
   }
 
   @override

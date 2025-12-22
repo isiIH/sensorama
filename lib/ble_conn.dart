@@ -5,6 +5,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'sensor_config.dart'; // Asegúrate de que esto apunta a tu modelo de datos
 
+class _SyncState {
+  // Inicializamos con el máximo entero posible (simulando infinito)
+  int minOffset = 9223372036854775807; 
+  int lastSensorTimestamp = -1;
+}
+
 class BLEConn extends ChangeNotifier {
   static final BLEConn _instance = BLEConn._internal();
 
@@ -18,6 +24,7 @@ class BLEConn extends ChangeNotifier {
   BluetoothCharacteristic? _dataCharacteristic;
   StreamSubscription? _valueChangedSubscription;
   StreamSubscription? _connectionStateSubscription;
+  final Map<String, _SyncState> _sensorSyncStates = {};
 
   // UUIDs - Deben coincidir con la config del ESP32
   final Guid serviceUUID = Guid("e0277977-85ca-4ea2-8b83-82a1789c1048");
@@ -199,15 +206,14 @@ class BLEConn extends ChangeNotifier {
         packets.add(newPacket);
 
         notifyListeners();
-        
-        // Log ligero para no saturar consola
-        // print('✅ Packet: ${newPacket.sensorId} [${newPacket.data.length} samples]');
       } catch (e) {
         print('❌ Error decodificando binario: $e');
       }
   }
 
   Map<String, dynamic> _reconstructJsonMap(Uint8List bytes) {
+    final int mobileArrivalUs = DateTime.now().microsecondsSinceEpoch;
+    
     final buffer = ByteData.sublistView(bytes);
     int offset = 0;
 
@@ -232,18 +238,21 @@ class BLEConn extends ChangeNotifier {
     offset += 1;
 
     // Timestamp Base (Int32) - Viene en ms desde el C++
-    int tsBaseUs = buffer.getInt64(offset, Endian.little);
+    int tsSensorBaseUs = buffer.getInt64(offset, Endian.little);
     offset += 8;
 
     // Sensor Name (Char[6])
     String sensorId = String.fromCharCodes(bytes.sublist(offset, offset + 6)).trim();
     offset += 6;
 
+    double intervalUs = 1000000.0 / freq;
+    double bufferDurationUs = (nSamples - 1) * intervalUs;
+    int tsSensorLastSampleUs = tsSensorBaseUs + bufferDurationUs.round();
+
+    int bestOffset = _calculateBestOffset(macAddress, tsSensorLastSampleUs, mobileArrivalUs);
+
     // --- 2. DATA ---
     // Reconstruimos la lista: [ [[val], ts], ... ]
-    // Calculamos el intervalo en microsegundos para interpolar el tiempo
-    // Intervalo = 1,000,000 us / Freq
-    double intervalUs = 1000000.0 / freq;
 
     List<List<dynamic>> reconstructedData = [];
 
@@ -260,11 +269,12 @@ class BLEConn extends ChangeNotifier {
 
       // Calculamos el timestamp interpolado para esta muestra
       // TS = Base + (i * intervalo)
-      int sampleTs = tsBaseUs + (i * intervalUs).round();
+      int sensorSampleTs = tsSensorBaseUs + (i * intervalUs).round();
+      int synchronizedTs = sensorSampleTs + bestOffset;
 
       // Estructura original: [[val], timestamp]
       // Nota: values es una lista [val], sampleTs es int
-      reconstructedData.add([values, sampleTs]);
+      reconstructedData.add([values, synchronizedTs]);
     }
 
     // --- 3. METADATA ---
@@ -292,6 +302,36 @@ class BLEConn extends ChangeNotifier {
         "units": units
       }
     };
+  }
+
+  int _calculateBestOffset(String mac, int sensorTs, int mobileTs) {
+    // Inicializar estado si es la primera vez que vemos este sensor
+    _sensorSyncStates.putIfAbsent(mac, () => _SyncState());
+    final state = _sensorSyncStates[mac]!;
+
+    // 1. DETECCIÓN DE REINICIO
+    // Si el tiempo del sensor viajó al pasado, el ESP32 se reinició.
+    if (sensorTs < state.lastSensorTimestamp) {
+      print("⚠️ Reinicio detectado en $mac. Reseteando sincronización.");
+      state.minOffset = 9223372036854775807; // Reset a infinito
+    }
+    state.lastSensorTimestamp = sensorTs;
+
+    // 2. CÁLCULO DE OFFSET CANDIDATO
+    // Offset = TiempoMóvil - TiempoSensor
+    // Representa: "Qué diferencia hay entre relojes + latencia actual"
+    int candidateOffset = mobileTs - sensorTs;
+
+    // 3. ACTUALIZACIÓN DEL MEJOR OFFSET (Convex Hull)
+    // Solo actualizamos si encontramos un offset MENOR al actual.
+    // Un offset menor significa que el paquete llegó más rápido (menos latencia de red).
+    if (candidateOffset < state.minOffset) {
+      state.minOffset = candidateOffset;
+      // Opcional: Debug para ver convergencia
+      // print("🚀 Sincronización mejorada para $mac. Offset: ${state.minOffset}");
+    }
+
+    return state.minOffset;
   }
 
   /// 🛑 Detiene todo y desconecta

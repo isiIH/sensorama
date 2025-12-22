@@ -5,6 +5,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'sensor_config.dart'; // Asumo que aquí está tu clase SensorPacket
 
+class _SyncState {
+  // Inicializamos con el máximo entero posible (simulando infinito)
+  int minOffset = 9223372036854775807; 
+  int lastSensorTimestamp = -1;
+}
+
 class UDPConn extends ChangeNotifier {
   static final UDPConn _instance = UDPConn._internal();
 
@@ -18,6 +24,7 @@ class UDPConn extends ChangeNotifier {
   RawDatagramSocket? _socket;
   final Map<String, dynamic> _clients = {};
   final List<SensorPacket> packets = [];
+  final Map<String, _SyncState> _sensorSyncStates = {};
 
   // Constantes de decodificación (Deben coincidir con C++)
   static const double _scalar = 100.0; 
@@ -87,14 +94,9 @@ class UDPConn extends ChangeNotifier {
     }
   }
 
-  /// 🧠 LÓGICA CORE: Convierte Bytes -> Map<String, dynamic>
-  /// Recrea la estructura JSON original:
-  /// {
-  ///   "sensor_id": "...",
-  ///   "data": [ [[val], ts], [[val], ts] ... ],
-  ///   "metadata": { ... }
-  /// }
   Map<String, dynamic> _reconstructJsonMap(Uint8List bytes) {
+    final int mobileArrivalUs = DateTime.now().microsecondsSinceEpoch;
+
     final buffer = ByteData.sublistView(bytes);
     int offset = 0;
 
@@ -119,19 +121,21 @@ class UDPConn extends ChangeNotifier {
     offset += 1;
 
     // Timestamp Base (Int32) - Viene en ms desde el C++
-    int tsBaseUs = buffer.getInt64(offset, Endian.little);
+    int tsSensorBaseUs = buffer.getInt64(offset, Endian.little);
     offset += 8;
 
     // Sensor Name (Char[6])
     String sensorId = String.fromCharCodes(bytes.sublist(offset, offset + 6)).trim();
     offset += 6;
 
+    double intervalUs = 1000000.0 / freq;
+    double bufferDurationUs = (nSamples - 1) * intervalUs;
+    int tsSensorLastSampleUs = tsSensorBaseUs + bufferDurationUs.round();
+
+    int bestOffset = _calculateBestOffset(macAddress, tsSensorLastSampleUs, mobileArrivalUs);
+
     // --- 2. DATA ---
     // Reconstruimos la lista: [ [[val], ts], ... ]
-    // Calculamos el intervalo en microsegundos para interpolar el tiempo
-    // Intervalo = 1,000,000 us / Freq
-    double intervalUs = 1000000.0 / freq;
-
     List<List<dynamic>> reconstructedData = [];
 
     for (int i = 0; i < nSamples; i++) {
@@ -147,11 +151,12 @@ class UDPConn extends ChangeNotifier {
 
       // Calculamos el timestamp interpolado para esta muestra
       // TS = Base + (i * intervalo)
-      int sampleTs = tsBaseUs + (i * intervalUs).round();
+      int sensorSampleTs = tsSensorBaseUs + (i * intervalUs).round();
+      int synchronizedTs = sensorSampleTs + bestOffset;
 
       // Estructura original: [[val], timestamp]
       // Nota: values es una lista [val], sampleTs es int
-      reconstructedData.add([values, sampleTs]);
+      reconstructedData.add([values, synchronizedTs]);
     }
 
     // --- 3. METADATA ---
@@ -179,6 +184,36 @@ class UDPConn extends ChangeNotifier {
         "units": units
       }
     };
+  }
+
+  int _calculateBestOffset(String mac, int sensorTs, int mobileTs) {
+    // Inicializar estado si es la primera vez que vemos este sensor
+    _sensorSyncStates.putIfAbsent(mac, () => _SyncState());
+    final state = _sensorSyncStates[mac]!;
+
+    // 1. DETECCIÓN DE REINICIO
+    // Si el tiempo del sensor viajó al pasado, el ESP32 se reinició.
+    if (sensorTs < state.lastSensorTimestamp) {
+      print("⚠️ Reinicio detectado en $mac. Reseteando sincronización.");
+      state.minOffset = 9223372036854775807; // Reset a infinito
+    }
+    state.lastSensorTimestamp = sensorTs;
+
+    // 2. CÁLCULO DE OFFSET CANDIDATO
+    // Offset = TiempoMóvil - TiempoSensor
+    // Representa: "Qué diferencia hay entre relojes + latencia actual"
+    int candidateOffset = mobileTs - sensorTs;
+
+    // 3. ACTUALIZACIÓN DEL MEJOR OFFSET (Convex Hull)
+    // Solo actualizamos si encontramos un offset MENOR al actual.
+    // Un offset menor significa que el paquete llegó más rápido (menos latencia de red).
+    if (candidateOffset < state.minOffset) {
+      state.minOffset = candidateOffset;
+      // Opcional: Debug para ver convergencia
+      // print("🚀 Sincronización mejorada para $mac. Offset: ${state.minOffset}");
+    }
+
+    return state.minOffset;
   }
 
   List<String> getConnectedClients() {

@@ -145,27 +145,27 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
     _ticker.dispose();
     _tcpConn.removeListener(_onNewSensorData);
     _udpConn.removeListener(_onNewSensorData);
-    _udpConn.removeListener(_onNewSensorData);
+    _bleConn.removeListener(_onNewSensorData);
     super.dispose();
   }
 
   // --- PROCESAMIENTO DE PAQUETES DE RED ---
   void _onNewSensorData() {
-    // Procesar paquetes TCP
-    if (_tcpConn.packets.isNotEmpty) {
-      final SensorPacket packet = _tcpConn.packets.last;
+    // 1. Consumir TODOS los paquetes TCP pendientes y eliminarlos de la lista
+    while (_tcpConn.packets.isNotEmpty) {
+      final SensorPacket packet = _tcpConn.packets.removeAt(0); // FIFO: Sacar el primero
       _processSensorPacket(packet);
     }
 
-    // Procesar paquetes UDP
-    if (_udpConn.packets.isNotEmpty) {
-      final SensorPacket packet = _udpConn.packets.last;
+    // 2. Consumir TODOS los paquetes UDP pendientes
+    while (_udpConn.packets.isNotEmpty) {
+      final SensorPacket packet = _udpConn.packets.removeAt(0);
       _processSensorPacket(packet);
     }
 
-    // Procesar paquetes BLE
-    if (_bleConn.packets.isNotEmpty) {
-      final SensorPacket packet = _bleConn.packets.last;
+    // 3. Consumir TODOS los paquetes BLE pendientes
+    while (_bleConn.packets.isNotEmpty) {
+      final SensorPacket packet = _bleConn.packets.removeAt(0);
       _processSensorPacket(packet);
     }
   }

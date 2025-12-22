@@ -11,6 +11,12 @@ Future<String?> getLocalIpAddress() async {
   return await info.getWifiIP();
 }
 
+class _SyncState {
+  // Inicializamos con el máximo entero posible (simulando infinito)
+  int minOffset = 9223372036854775807; 
+  int lastSensorTimestamp = -1;
+}
+
 class TCPConn extends ChangeNotifier {
   static final TCPConn _instance = TCPConn._internal();
 
@@ -23,6 +29,7 @@ class TCPConn extends ChangeNotifier {
   final int _port = int.parse(dotenv.env['PORT'] ?? '8080');
   ServerSocket? _server;
   final List<Socket> _clients = [];
+  final Map<String, _SyncState> _sensorSyncStates = {};
   
   // Lista de paquetes procesados listos para la UI
   final List<SensorPacket> packets = [];
@@ -128,30 +135,56 @@ class TCPConn extends ChangeNotifier {
   }
 
   /// Decodifica un paquete binario VALIDADO y COMPLETO
+  /// Decodifica un paquete binario VALIDADO y COMPLETO
   void _decodePacket(Uint8List bytes, int nSamples, int mDims) {
     try {
+      final int mobileArrivalUs = DateTime.now().microsecondsSinceEpoch;
+
       final buffer = ByteData.sublistView(bytes);
       int readPtr = 0;
 
       // --- 1. HEADER ---
       // MAC (6)
+      final macBytes = bytes.sublist(readPtr, readPtr + 6);
+      String macAddress = macBytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+          .join(':');
       readPtr += 6; 
+      
       // Freq (2)
       int freq = buffer.getInt16(readPtr, Endian.little);
       readPtr += 2;
-      // N Samples (2) - Ya lo leímos fuera, pero avanzamos el puntero
+      
+      // N Samples (2)
       readPtr += 2;
+      
       // M Dims (1)
       readPtr += 1;
-      // Timestamp Base (8)
-      int tsBaseUs = buffer.getInt64(readPtr, Endian.little);
+      
+      // Timestamp Base (8) -> TIEMPO DE LA PRIMERA MUESTRA
+      int tsSensorBaseUs = buffer.getInt64(readPtr, Endian.little);
       readPtr += 8;
+      
       // Sensor Name (6)
       String sensorId = String.fromCharCodes(bytes.sublist(readPtr, readPtr + 6)).trim();
       readPtr += 6;
 
-      // --- 2. DATA ---
+      // ---------------------------------------------------------
+      // CORRECCIÓN CRÍTICA DE SINCRONIZACIÓN TCP
+      // ---------------------------------------------------------
       double intervalUs = 1000000.0 / freq;
+      
+      // Calculamos cuándo ocurrió la ÚLTIMA muestra del paquete
+      // (asumiendo que nSamples > 0)
+      double bufferDurationUs = (nSamples - 1) * intervalUs;
+      int tsSensorLastSampleUs = tsSensorBaseUs + bufferDurationUs.round();
+
+      // Calculamos el offset comparando:
+      // AHORA (Móvil) vs MOMENTO QUE SE COMPLETÓ EL BUFFER (Sensor)
+      int bestOffset = _calculateBestOffset(macAddress, tsSensorLastSampleUs, mobileArrivalUs);
+      // ---------------------------------------------------------
+
+      // --- 2. DATA ---
       List<List<dynamic>> reconstructedData = [];
 
       for (int i = 0; i < nSamples; i++) {
@@ -161,8 +194,16 @@ class TCPConn extends ChangeNotifier {
           readPtr += 2;
           values.add(rawVal / _scalar);
         }
-        int sampleTs = tsBaseUs + (i * intervalUs).round();
-        reconstructedData.add([values, sampleTs]);
+        
+        // Reconstrucción local de tiempos:
+        // Usamos la Base para iterar, PERO le sumamos el offset corregido.
+        int sensorSampleTs = tsSensorBaseUs + (i * intervalUs).round();
+        
+        // Al aplicar el offset calculado con el final del paquete, 
+        // automáticamente restamos el tiempo de buffering.
+        int synchronizedTs = sensorSampleTs + bestOffset;
+        
+        reconstructedData.add([values, synchronizedTs]);
       }
 
       // --- 3. METADATA ---
@@ -195,8 +236,38 @@ class TCPConn extends ChangeNotifier {
       notifyListeners();
 
     } catch (e) {
-      print('❌ Error lógico decodificando paquete: $e');
+      print('❌ Error lógico decodificando paquete TCP: $e');
     }
+  }
+  
+  int _calculateBestOffset(String mac, int sensorTs, int mobileTs) {
+    // Inicializar estado si es la primera vez que vemos este sensor
+    _sensorSyncStates.putIfAbsent(mac, () => _SyncState());
+    final state = _sensorSyncStates[mac]!;
+
+    // 1. DETECCIÓN DE REINICIO
+    // Si el tiempo del sensor viajó al pasado, el ESP32 se reinició.
+    if (sensorTs < state.lastSensorTimestamp) {
+      print("⚠️ Reinicio detectado en $mac. Reseteando sincronización.");
+      state.minOffset = 9223372036854775807; // Reset a infinito
+    }
+    state.lastSensorTimestamp = sensorTs;
+
+    // 2. CÁLCULO DE OFFSET CANDIDATO
+    // Offset = TiempoMóvil - TiempoSensor
+    // Representa: "Qué diferencia hay entre relojes + latencia actual"
+    int candidateOffset = mobileTs - sensorTs;
+
+    // 3. ACTUALIZACIÓN DEL MEJOR OFFSET (Convex Hull)
+    // Solo actualizamos si encontramos un offset MENOR al actual.
+    // Un offset menor significa que el paquete llegó más rápido (menos latencia de red).
+    if (candidateOffset < state.minOffset) {
+      state.minOffset = candidateOffset;
+      // Opcional: Debug para ver convergencia
+      // print("🚀 Sincronización mejorada para $mac. Offset: ${state.minOffset}");
+    }
+
+    return state.minOffset;
   }
 
   void _removeClient(Socket client) {

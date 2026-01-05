@@ -4,6 +4,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import '../models/sensor_packet.dart';
 
+class _SyncState {
+  // Inicializamos con el máximo entero posible (simulando infinito)
+  int minOffset = 9223372036854775807;
+  int lastSensorTimestamp = -1;
+}
 
 abstract class Protocol extends ChangeNotifier {
   static const double scalar = 100.0;
@@ -13,8 +18,9 @@ abstract class Protocol extends ChangeNotifier {
 
   final int port = int.parse(dotenv.env['PORT']!);
   dynamic server;
-  // final ListQueue<SensorPacket> packets = ListQueue();
   late SensorPacket currentPacket;
+
+  final Map<String, _SyncState> _sensorSyncStates = {};
 
   final connectionController = StreamController<String>.broadcast();
   Stream<String> get onClientConnected => connectionController.stream;
@@ -45,6 +51,8 @@ abstract class Protocol extends ChangeNotifier {
     final buffer = ByteData.sublistView(bytes);
     int offset = 0;
 
+    final int mobileArrivalUs = DateTime.now().microsecondsSinceEpoch;
+
     // --- 1. HEADER ---
     // MAC (6 bytes) - Convertimos a String "XX:XX:XX:XX:XX:XX"
     final macBytes = bytes.sublist(offset, offset + 6);
@@ -66,18 +74,18 @@ abstract class Protocol extends ChangeNotifier {
     offset += 1;
 
     // Timestamp Base (Int32) - Viene en ms desde el C++
-    int tsBaseUs = buffer.getInt64(offset, Endian.little);
+    int tsSensorBaseUs = buffer.getInt64(offset, Endian.little);
     offset += 8;
 
     // Sensor Name (Char[6])
     String sensorId = String.fromCharCodes(bytes.sublist(offset, offset + 6)).trim();
     offset += 6;
 
-    // --- 2. DATA ---
-    // Reconstruimos la lista: [ [[val], ts], ... ]
-    // Calculamos el intervalo en microsegundos para interpolar el tiempo
-    // Intervalo = 1,000,000 us / Freq
     double intervalUs = 1000000.0 / freq;
+    double bufferDurationUs = (nSamples - 1) * intervalUs;
+    int tsSensorLastSampleUs = tsSensorBaseUs + bufferDurationUs.round();
+
+    int bestOffset = _calculateBestOffset(macAddress, tsSensorLastSampleUs, mobileArrivalUs);
 
     List<List<dynamic>> reconstructedData = [];
 
@@ -92,13 +100,17 @@ abstract class Protocol extends ChangeNotifier {
         values.add(rawVal / scalar);
       }
 
-      // Calculamos el timestamp interpolado para esta muestra
-      // TS = Base + (i * intervalo)
-      int sampleTs = tsBaseUs + (i * intervalUs).round();
+      // Reconstrucción local de tiempos:
+      // Usamos la Base para iterar, PERO le sumamos el offset corregido.
+      int sensorSampleTs = tsSensorBaseUs + (i * intervalUs).round();
+
+      // Al aplicar el offset calculado con el final del paquete,
+      // automáticamente restamos el tiempo de buffering.
+      int synchronizedTs = sensorSampleTs + bestOffset;
 
       // Estructura original: [[val], timestamp]
       // Nota: values es una lista [val], sampleTs es int
-      reconstructedData.add([values, sampleTs]);
+      reconstructedData.add([values, synchronizedTs]);
     }
 
     // --- 3. METADATA ---
@@ -128,6 +140,36 @@ abstract class Protocol extends ChangeNotifier {
     );
     notifyListeners();
     debugPrint('✅ [$type] Packet: ${currentPacket.sensorId} [${currentPacket.data.length} samples]');
+  }
+
+  int _calculateBestOffset(String mac, int sensorTs, int mobileTs) {
+    // Inicializar estado si es la primera vez que vemos este sensor
+    _sensorSyncStates.putIfAbsent(mac, () => _SyncState());
+    final state = _sensorSyncStates[mac]!;
+
+    // 1. DETECCIÓN DE REINICIO
+    // Si el tiempo del sensor viajó al pasado, el ESP32 se reinició.
+    if (sensorTs < state.lastSensorTimestamp) {
+      debugPrint("⚠️ Reinicio detectado en $mac. Reseteando sincronización.");
+      state.minOffset = 9223372036854775807; // Reset a infinito
+    }
+    state.lastSensorTimestamp = sensorTs;
+
+    // 2. CÁLCULO DE OFFSET CANDIDATO
+    // Offset = TiempoMóvil - TiempoSensor
+    // Representa: "Qué diferencia hay entre relojes + latencia actual"
+    int candidateOffset = mobileTs - sensorTs;
+
+    // 3. ACTUALIZACIÓN DEL MEJOR OFFSET (Convex Hull)
+    // Solo actualizamos si encontramos un offset MENOR al actual.
+    // Un offset menor significa que el paquete llegó más rápido (menos latencia de red).
+    if (candidateOffset < state.minOffset) {
+      state.minOffset = candidateOffset;
+      // Opcional: Debug para ver convergencia
+      debugPrint("🚀 Sincronización mejorada para $mac. Offset: ${state.minOffset}");
+    }
+
+    return state.minOffset;
   }
 
   /// Cierra el servidor

@@ -81,7 +81,7 @@ class BLEConn extends Protocol {
       await _targetDevice.connect(
         license: License.free,
         autoConnect: false,
-        timeout: Duration(seconds: 4) // Ventana de búsqueda
+        timeout: const Duration(seconds: 4), // Ventana de búsqueda
       );
     // Si llegamos aquí, connect() tuvo éxito, el listener de connectionState llamará a _negotiateConnection
     } catch (e) {
@@ -123,11 +123,14 @@ class BLEConn extends Protocol {
 
         _valueChangedSubscription?.cancel();
         _valueChangedSubscription = dataChar.onValueReceived.listen((value) {
-          if (value.length >= Protocol.headerSize) {
-            // Asumiendo que decodePacket y currentPacket son parte de Protocol o globales
-            decodePacket(Uint8List.fromList(value));
-            // Asumiendo que connectionController existe en la clase padre o global
-            connectionController.add(currentPacket.macAddress);
+          if (value.length >= Protocol.dataHeaderSize) {
+            // Use new processPacket method that handles packet routing
+            processPacket(Uint8List.fromList(value));
+            
+            // Only notify if we have valid data
+            if (hasMetadataForMac(currentPacket.macAddress)) {
+              connectionController.add(currentPacket.macAddress);
+            }
           }
         });
         debugPrint('✅ Flujo de datos activo.');

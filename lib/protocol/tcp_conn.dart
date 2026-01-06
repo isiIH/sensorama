@@ -37,26 +37,63 @@ class TCPConn extends Protocol {
   }
 
   void _processBuffer(Socket client, BytesBuilder buffer) {
-    // Mientras tengamos al menos el tamaño de un header, intentamos leer
-    while (buffer.length >= Protocol.headerSize) {
+    // Mientras tengamos al menos el tamaño mínimo de un header, intentamos leer
+    while (buffer.length >= Protocol.dataHeaderSize) {
       Uint8List currentBytes = buffer.toBytes();
-      final headerView = ByteData.sublistView(currentBytes, 0, Protocol.headerSize);
+      
+      // Peek at packet type to determine header size
+      if (currentBytes.length < 7) break;
+      
+      final int packetType = currentBytes[6];
+      int totalPacketSize;
 
-      int nSamples = headerView.getInt16(8, Endian.little);
-      int mDims = headerView.getInt8(10);
-
-      // Calculamos el tamaño total que DEBERÍA tener el paquete
-      // Header (21) + Data (nSamples * mDims * 2) + Labels (mDims * 4) + Units (mDims * 4)
-      int dataSize = nSamples * mDims * 2;
-      int metaSize = (mDims * 4) + (mDims * 4);
-      int totalPacketSize = Protocol.headerSize + dataSize + metaSize;
+      if (packetType == Protocol.packetTypeMetadata) {
+        // Metadata packet
+        if (currentBytes.length < Protocol.metadataHeaderSize) break;
+        
+        final headerView = ByteData.sublistView(currentBytes, 0, Protocol.metadataHeaderSize);
+        int mDims = headerView.getInt8(17); // Dimensions at offset 17
+        
+        // Metadata size: Header + Labels(dims*4) + Units(dims*4) + MinSignals(dims*4) + MaxSignals(dims*4)
+        totalPacketSize = Protocol.metadataHeaderSize + (mDims * 4 * 4);
+        
+      } else if (packetType == Protocol.packetTypeData) {
+        // Data packet - need metadata to know the size
+        final macBytes = currentBytes.sublist(0, 6);
+        String macAddress = macBytes
+            .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+            .join(':');
+        
+        final metadata = getMetadataForMac(macAddress);
+        if (metadata == null) {
+          // No metadata yet - can't process data packet
+          // Try to find a metadata packet instead or wait
+          debugPrint('⚠️ [TCP] No metadata for $macAddress - waiting for metadata packet');
+          break;
+        }
+        
+        int dataSize = metadata.samplesPerPacket * metadata.dimensions * 2;
+        totalPacketSize = Protocol.dataHeaderSize + dataSize;
+        
+      } else {
+        // Try legacy format
+        if (currentBytes.length < Protocol.legacyHeaderSize) break;
+        
+        final headerView = ByteData.sublistView(currentBytes, 0, Protocol.legacyHeaderSize);
+        int nSamples = headerView.getInt16(8, Endian.little);
+        int mDims = headerView.getInt8(10);
+        
+        int dataSize = nSamples * mDims * 2;
+        int metaSize = (mDims * 4) + (mDims * 4);
+        totalPacketSize = Protocol.legacyHeaderSize + dataSize + metaSize;
+      }
 
       // VERIFICACIÓN: ¿Tenemos el paquete completo en el buffer?
       if (buffer.length >= totalPacketSize) {
         Uint8List packetBytes = currentBytes.sublist(0, totalPacketSize);
 
-        // Procesamos el paquete y notificamos
-        decodePacket(packetBytes);
+        // Process the packet using the new routing method
+        processPacket(packetBytes);
 
         connectionController.add(currentPacket.macAddress);
 

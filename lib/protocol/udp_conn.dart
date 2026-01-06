@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'protocol.dart';
 
@@ -16,15 +17,24 @@ class UDPConn extends Protocol {
       final Uint8List data = datagram.data;
 
       // --- PROCESAMIENTO BINARIO ---
-      if (data.length < Protocol.headerSize) {
+      if (data.length < Protocol.dataHeaderSize) {
         debugPrint('⚠️ Paquete descartado: Tamaño insuficiente (${data.length} bytes)');
         return;
       }
 
       try {
-        // Procesamos el paquete y notificamos
-        decodePacket(data);
-        connectionController.add(currentPacket.macAddress);
+        // Process packet with sender info for ACK handling
+        processPacket(
+          data,
+          senderAddress: datagram.address,
+          senderPort: datagram.port,
+        );
+        
+        // Only add to connection controller if we have a valid packet
+        // (metadata packets also trigger this)
+        if (hasMetadataForMac(currentPacket.macAddress)) {
+          connectionController.add(currentPacket.macAddress);
+        }
       } catch (e) {
         debugPrint('❌ Error decodificando binario: $e');
       }

@@ -152,7 +152,7 @@ class BleService {
         // Timeout específico para BLE re-connect
         Future.delayed(const Duration(seconds: 40), () {
           if (!connectionCompleter.isCompleted) {
-            bleConn.disconnect();
+            bleConn.disconnectDevice(device.remoteId.str);
             if(!connectionCompleter.isCompleted) connectionCompleter.completeError("BLE Reconnection Timeout");
           }
         });

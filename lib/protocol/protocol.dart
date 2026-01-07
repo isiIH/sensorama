@@ -22,7 +22,8 @@ abstract class Protocol extends ChangeNotifier {
 
   // --- Header Sizes ---
   static const int dataHeaderSize = 15;     // MAC(6) + Type(1) + Timestamp(8)
-  static const int metadataHeaderSize = 18; // MAC(6) + Type(1) + Freq(2) + Samples(2) + Dims(1) + Name(6)
+  static const int metadataHeaderSize = 12; // MAC(6) + Type(1) + Freq(2) + Samples(2) + Dims(1)
+  // Note: Metadata packet uses variable-length strings after header
   static const int legacyHeaderSize = 25;   // Old format for backwards compatibility
 
   late String type;
@@ -77,6 +78,8 @@ abstract class Protocol extends ChangeNotifier {
 
     // Read packet type at offset 6 (after MAC address)
     final int packetType = bytes[6];
+    
+    debugPrint('📥 [$type] Packet received: ${bytes.length} bytes, type=$packetType from $senderAddress:$senderPort');
 
     switch (packetType) {
       case packetTypeMetadata:
@@ -93,6 +96,7 @@ abstract class Protocol extends ChangeNotifier {
   }
 
   /// Decodes a metadata packet and stores/updates the sensor metadata
+  /// Uses variable-length string encoding: 1 byte (length) + N bytes (string)
   void _decodeMetadataPacket(Uint8List bytes, {InternetAddress? senderAddress, int? senderPort}) {
     if (bytes.length < metadataHeaderSize) {
       debugPrint('⚠️ Metadata packet too small: ${bytes.length} bytes');
@@ -124,33 +128,52 @@ abstract class Protocol extends ChangeNotifier {
     int dimensions = buffer.getInt8(offset);
     offset += 1;
 
-    // Sensor Name (6 chars)
-    String sensorId = String.fromCharCodes(bytes.sublist(offset, offset + 6)).trim();
-    offset += 6;
-
-    // Calculate expected remaining size
-    // Labels(dims*4) + Units(dims*4) + MinSignals(dims*4) + MaxSignals(dims*4)
-    int expectedRemainingSize = dimensions * 4 * 4;
-    if (bytes.length < metadataHeaderSize + expectedRemainingSize) {
-      debugPrint('⚠️ Metadata packet incomplete: expected ${metadataHeaderSize + expectedRemainingSize}, got ${bytes.length}');
+    // Sensor Name (variable length: 1 byte length + string)
+    int nameLen = bytes[offset++];
+    if (offset + nameLen > bytes.length) {
+      debugPrint('⚠️ Metadata packet truncated at sensor name');
       return;
     }
+    String sensorId = String.fromCharCodes(bytes.sublist(offset, offset + nameLen));
+    offset += nameLen;
 
-    // Labels (4 chars per dimension)
+    // Labels (variable length per dimension: 1 byte length + string)
     List<String> labels = [];
     for (int d = 0; d < dimensions; d++) {
-      labels.add(String.fromCharCodes(bytes.sublist(offset, offset + 4)).trim());
-      offset += 4;
+      if (offset >= bytes.length) {
+        debugPrint('⚠️ Metadata packet truncated at label $d');
+        return;
+      }
+      int labelLen = bytes[offset++];
+      if (offset + labelLen > bytes.length) {
+        debugPrint('⚠️ Metadata packet truncated at label $d data');
+        return;
+      }
+      labels.add(String.fromCharCodes(bytes.sublist(offset, offset + labelLen)));
+      offset += labelLen;
     }
 
-    // Units (4 chars per dimension)
+    // Units (variable length per dimension: 1 byte length + string)
     List<String> units = [];
     for (int d = 0; d < dimensions; d++) {
-      units.add(String.fromCharCodes(bytes.sublist(offset, offset + 4)).trim());
-      offset += 4;
+      if (offset >= bytes.length) {
+        debugPrint('⚠️ Metadata packet truncated at unit $d');
+        return;
+      }
+      int unitLen = bytes[offset++];
+      if (offset + unitLen > bytes.length) {
+        debugPrint('⚠️ Metadata packet truncated at unit $d data');
+        return;
+      }
+      units.add(String.fromCharCodes(bytes.sublist(offset, offset + unitLen)));
+      offset += unitLen;
     }
 
     // Min Signals (float32 per dimension)
+    if (offset + dimensions * 4 > bytes.length) {
+      debugPrint('⚠️ Metadata packet truncated at minSignals');
+      return;
+    }
     List<double> minSignals = [];
     for (int d = 0; d < dimensions; d++) {
       minSignals.add(buffer.getFloat32(offset, Endian.little));
@@ -158,6 +181,10 @@ abstract class Protocol extends ChangeNotifier {
     }
 
     // Max Signals (float32 per dimension)
+    if (offset + dimensions * 4 > bytes.length) {
+      debugPrint('⚠️ Metadata packet truncated at maxSignals');
+      return;
+    }
     List<double> maxSignals = [];
     for (int d = 0; d < dimensions; d++) {
       maxSignals.add(buffer.getFloat32(offset, Endian.little));

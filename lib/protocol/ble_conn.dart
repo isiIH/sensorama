@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -6,171 +7,210 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/constants.dart';
 import 'protocol.dart';
 
+/// Holds per-device connection state for multi-device BLE support
+class _BLEDeviceState {
+  final BluetoothDevice device;
+  StreamSubscription? valueChangedSubscription;
+  StreamSubscription? connectionStateSubscription;
+  bool intentionalDisconnect = false;
+  bool isNegotiating = false;
+
+  _BLEDeviceState(this.device);
+
+  String get deviceId => device.remoteId.str;
+
+  void cleanup() {
+    valueChangedSubscription?.cancel();
+    connectionStateSubscription?.cancel();
+  }
+}
+
 class BLEConn extends Protocol {
-  // Singleton Pattern
+  // Singleton Pattern (still singleton manager, but manages multiple devices)
   static final BLEConn _instance = BLEConn._internal();
   factory BLEConn() => _instance;
   BLEConn._internal() : super('BLE');
 
-  late BluetoothDevice _targetDevice;
-  StreamSubscription? _valueChangedSubscription;
-  StreamSubscription? _connectionStateSubscription;
+  // Track multiple connected devices by their remote ID
+  final Map<String, _BLEDeviceState> _connectedDevices = {};
 
-  // Control de estado
-  bool _intentionalDisconnect = false;
-  bool _isNegotiating = false;
+  static const String _prefConnectedDeviceIds = 'ble_connected_device_ids';
 
-  static const String _prefLastDeviceId = 'last_ble_device_id';
+  /// Get list of currently connected device IDs
+  List<String> get connectedDeviceIds => _connectedDevices.keys.toList();
 
-  /// Llamar al iniciar la app para reconectar automáticamente
+  /// Check if a device is connected
+  bool isDeviceConnected(String deviceId) => _connectedDevices.containsKey(deviceId);
+
+  /// Llamar al iniciar la app para reconectar automáticamente a todos los dispositivos guardados
   Future<void> restoreLastConnection() async {
     final prefs = await SharedPreferences.getInstance();
-    final String? lastId = prefs.getString(_prefLastDeviceId);
+    final String? savedIds = prefs.getString(_prefConnectedDeviceIds);
 
-    if (lastId != null && lastId.isNotEmpty) {
-      debugPrint("💾 Dispositivo guardado encontrado: $lastId. Intentando reconectar...");
-      // En FBP podemos instanciar un dispositivo directamente desde su ID sin escanear
-      final device = BluetoothDevice.fromId(lastId);
-      handleConnection(device);
+    if (savedIds != null && savedIds.isNotEmpty) {
+      final List<String> deviceIds = (jsonDecode(savedIds) as List).cast<String>();
+      debugPrint("💾 ${deviceIds.length} dispositivo(s) guardado(s). Intentando reconectar...");
+      
+      for (final deviceId in deviceIds) {
+        final device = BluetoothDevice.fromId(deviceId);
+        handleConnection(device);
+      }
     }
   }
 
   /// Comienza el ciclo de conexión persistente hacia una MAC específica.
-  /// No importa si el dispositivo se está reiniciando, este método lo buscará hasta encontrarlo.
+  /// Soporta múltiples dispositivos simultáneos.
   @override
   void handleConnection(dynamic event) {
-    _intentionalDisconnect = false;
-    _targetDevice = event;
-    _persistDevice(_targetDevice.remoteId.str); // guardamos el mac en prefs
-    
-    // Limpiamos subscripciones previas por seguridad
-    _cleanupSubscriptions();
+    final BluetoothDevice device = event;
+    final String deviceId = device.remoteId.str;
 
-    debugPrint("🏁 Iniciando monitoreo BLE para: ${_targetDevice.remoteId} (${_targetDevice.platformName})");
+    // Si ya está siendo gestionado, no duplicar
+    if (_connectedDevices.containsKey(deviceId)) {
+      debugPrint("⚠️ Dispositivo $deviceId ya está siendo gestionado.");
+      return;
+    }
 
-    // Escuchamos el estado de la conexión globalmente para este dispositivo
-    _connectionStateSubscription = _targetDevice.connectionState.listen((BluetoothConnectionState state) {
+    // Crear estado para este dispositivo
+    final deviceState = _BLEDeviceState(device);
+    _connectedDevices[deviceId] = deviceState;
+
+    _persistDevices(); // Guardar lista actualizada
+
+    debugPrint("🏁 Iniciando monitoreo BLE para: $deviceId (${device.platformName})");
+
+    // Escuchamos el estado de la conexión para este dispositivo
+    deviceState.connectionStateSubscription = device.connectionState.listen((BluetoothConnectionState state) {
       if (state == BluetoothConnectionState.connected) {
-        if (!_isNegotiating) {
-          debugPrint("✅ Dispositivo conectado a nivel físico. Iniciando negociación lógica...");
-           _negotiateConnection();
+        if (!deviceState.isNegotiating) {
+          debugPrint("✅ [$deviceId] Dispositivo conectado a nivel físico. Iniciando negociación lógica...");
+          _negotiateConnection(deviceState);
         }
       } else if (state == BluetoothConnectionState.disconnected) {
-        if (!_intentionalDisconnect) {
-          debugPrint("⚠️ Desconexión detectada (¿Reinicio de ESP32?). Iniciando reconexión...");
-          _reconnectLoop();
+        if (!deviceState.intentionalDisconnect) {
+          debugPrint("⚠️ [$deviceId] Desconexión detectada (¿Reinicio de ESP32?). Iniciando reconexión...");
+          _reconnectLoop(deviceState);
         } else {
-          debugPrint("ℹ️ Desconexión intencional completada.");
+          debugPrint("ℹ️ [$deviceId] Desconexión intencional completada.");
         }
       }
     });
 
-    // Intentamos conectar inmediatamente (o entrar en el loop de reconexión si se está reiniciando)
-    _reconnectLoop();
+    // Intentamos conectar inmediatamente
+    _reconnectLoop(deviceState);
   }
 
   /// Bucle recursivo que intenta conectar con el dispositivo específico
-  void _reconnectLoop() async {
-    if (_intentionalDisconnect || _targetDevice.isConnected) return;
+  void _reconnectLoop(_BLEDeviceState deviceState) async {
+    if (deviceState.intentionalDisconnect || deviceState.device.isConnected) return;
+
+    // Verificar si aún existe en nuestra lista (pudo haber sido removido)
+    if (!_connectedDevices.containsKey(deviceState.deviceId)) return;
 
     try {
-      debugPrint("🔄 Buscando dispositivo ${_targetDevice.remoteId}...");
-      // Intentamos conectar.
-      // timeout: le da tiempo al ESP32 de arrancar.
-      // autoConnect: false para que falle (timeout) si no está y podamos reintentar la lógica manualmente.
-      await _targetDevice.connect(
+      debugPrint("🔄 [${deviceState.deviceId}] Buscando dispositivo...");
+      await deviceState.device.connect(
         license: License.free,
         autoConnect: false,
-        timeout: const Duration(seconds: 4), // Ventana de búsqueda
+        timeout: const Duration(seconds: 4),
       );
-    // Si llegamos aquí, connect() tuvo éxito, el listener de connectionState llamará a _negotiateConnection
     } catch (e) {
-      // Si falla (timeout o error porque el ESP32 sigue reiniciando)
-      if (!_intentionalDisconnect) {
-        debugPrint("⏳ Dispositivo no encontrado o reiniciando... reintentando en 1s.");
-        // Espera no bloqueante antes de reintentar
-        Future.delayed(Duration(seconds: 1), () => _reconnectLoop());
+      if (!deviceState.intentionalDisconnect && _connectedDevices.containsKey(deviceState.deviceId)) {
+        debugPrint("⏳ [${deviceState.deviceId}] Dispositivo no encontrado o reiniciando... reintentando en 1s.");
+        Future.delayed(Duration(seconds: 1), () => _reconnectLoop(deviceState));
       }
     }
   }
 
   /// Lógica de Servicios y Suscripciones (MTU, Notify)
-  Future<void> _negotiateConnection() async {
-    _isNegotiating = true;
+  Future<void> _negotiateConnection(_BLEDeviceState deviceState) async {
+    deviceState.isNegotiating = true;
+    final device = deviceState.device;
+    final deviceId = deviceState.deviceId;
 
     try {
-      // Descubrir servicios
-      List<BluetoothService> services = await _targetDevice.discoverServices();
+      List<BluetoothService> services = await device.discoverServices();
 
-      // Buscar servicio y característica en una pasada eficiente
       BluetoothCharacteristic? dataChar;
 
       try {
         final service = services.firstWhere((s) => s.uuid == AppConstants.dataServiceUUID);
         dataChar = service.characteristics.firstWhere((c) => c.uuid == AppConstants.charDataUUID);
       } catch (e) {
-        // Si no encuentra el servicio o la característica (ej. modo Aprovisionamiento)
-        debugPrint("⛔ Servicio/Característica no encontrados. Abortando persistencia.");
-        disconnect();
+        debugPrint("⛔ [$deviceId] Servicio/Característica no encontrados. Abortando persistencia.");
+        disconnectDevice(deviceId);
         return;
       }
 
-      // Suscribirse
       if (dataChar.properties.notify) {
         if (!dataChar.isNotifying) {
           await dataChar.setNotifyValue(true);
         }
 
-        _valueChangedSubscription?.cancel();
-        _valueChangedSubscription = dataChar.onValueReceived.listen((value) {
+        deviceState.valueChangedSubscription?.cancel();
+        deviceState.valueChangedSubscription = dataChar.onValueReceived.listen((value) {
           if (value.length >= Protocol.dataHeaderSize) {
             // Use new processPacket method that handles packet routing
             processPacket(Uint8List.fromList(value));
-            
-            // Only notify if we have valid data
-            if (hasMetadataForMac(currentPacket.macAddress)) {
-              connectionController.add(currentPacket.macAddress);
-            }
           }
         });
-        debugPrint('✅ Flujo de datos activo.');
+        debugPrint('✅ [$deviceId] Flujo de datos activo.');
       }
 
     } catch (e) {
-      debugPrint("❌ Error negociación: $e. Reiniciando conexión...");
-      _targetDevice.disconnect();
+      debugPrint("❌ [$deviceId] Error negociación: $e. Reiniciando conexión...");
+      device.disconnect();
     } finally {
-      _isNegotiating = false;
+      deviceState.isNegotiating = false;
     }
   }
 
-  /// 🛑 Detiene todo y desconecta
+  /// 🛑 Desconecta un dispositivo específico por su ID
+  Future<void> disconnectDevice(String deviceId) async {
+    final deviceState = _connectedDevices[deviceId];
+    if (deviceState == null) {
+      debugPrint("⚠️ Dispositivo $deviceId no encontrado en la lista de conexiones.");
+      return;
+    }
+
+    deviceState.intentionalDisconnect = true;
+    debugPrint('🛑 [$deviceId] Solicitud de desconexión manual.');
+    
+    deviceState.cleanup();
+    _connectedDevices.remove(deviceId);
+    
+    await _persistDevices();
+    
+    await deviceState.device.disconnect();
+  }
+
+  /// 🛑 Desconecta todos los dispositivos
+  Future<void> disconnectAll() async {
+    debugPrint('🛑 Desconectando todos los dispositivos BLE...');
+    
+    final deviceIds = _connectedDevices.keys.toList();
+    for (final deviceId in deviceIds) {
+      await disconnectDevice(deviceId);
+    }
+  }
+
+  /// Alias for backwards compatibility - disconnects all devices
   Future<void> disconnect() async {
-    _intentionalDisconnect = true;
-    debugPrint('🛑 Solicitud de desconexión manual.');
-    
-    _cleanupSubscriptions();
-
-    // Borramos el ID del dispositivo
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_prefLastDeviceId);
-    
-    await _targetDevice.disconnect();
-  }
-  
-  void _cleanupSubscriptions() {
-    _valueChangedSubscription?.cancel();
-    _connectionStateSubscription?.cancel();
+    await disconnectAll();
   }
 
-  Future<void> _persistDevice(String id) async {
+  Future<void> _persistDevices() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefLastDeviceId, id);
+    final ids = _connectedDevices.keys.toList();
+    await prefs.setString(_prefConnectedDeviceIds, jsonEncode(ids));
   }
 
   @override
   Future<void> stop() async {
-    _cleanupSubscriptions();
+    for (final deviceState in _connectedDevices.values) {
+      deviceState.cleanup();
+    }
+    _connectedDevices.clear();
     super.stop();
   }
 }

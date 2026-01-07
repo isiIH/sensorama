@@ -10,15 +10,18 @@ class UDPConn extends Protocol {
 
   @override
   void handleConnection(dynamic event) {
+    // For RawDatagramSocket, event is a RawSocketEvent
+    if (event != RawSocketEvent.read) return;
+    
     try {
-      final datagram = server!.receive();
+      final datagram = (server as RawDatagramSocket).receive();
       if (datagram == null) return;
 
       final Uint8List data = datagram.data;
 
       // --- PROCESAMIENTO BINARIO ---
       if (data.length < Protocol.dataHeaderSize) {
-        debugPrint('⚠️ Paquete descartado: Tamaño insuficiente (${data.length} bytes)');
+        debugPrint('⚠️ Paquete UDP descartado: Tamaño insuficiente (${data.length} bytes)');
         return;
       }
 
@@ -29,14 +32,8 @@ class UDPConn extends Protocol {
           senderAddress: datagram.address,
           senderPort: datagram.port,
         );
-        
-        // Only add to connection controller if we have a valid packet
-        // (metadata packets also trigger this)
-        if (hasMetadataForMac(currentPacket.macAddress)) {
-          connectionController.add(currentPacket.macAddress);
-        }
       } catch (e) {
-        debugPrint('❌ Error decodificando binario: $e');
+        debugPrint('❌ Error decodificando binario UDP: $e');
       }
 
     } catch (e) {

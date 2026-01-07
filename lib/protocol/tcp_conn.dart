@@ -50,7 +50,7 @@ class TCPConn extends Protocol {
 
       try {
         if (packetType == Protocol.packetTypeMetadata) {
-          // Metadata packet (type 0x00)
+          // Metadata packet (type 0x00) with variable-length strings
           if (currentBytes.length < Protocol.metadataHeaderSize) break;
           
           final headerView = ByteData.sublistView(currentBytes, 0, Protocol.metadataHeaderSize);
@@ -64,8 +64,13 @@ class TCPConn extends Protocol {
             continue;
           }
           
-          // Metadata size: Header(18) + Labels(dims*4) + Units(dims*4) + MinSignals(dims*4) + MaxSignals(dims*4)
-          totalPacketSize = Protocol.metadataHeaderSize + (mDims * 4 * 4);
+          // Calculate variable-length packet size by scanning string lengths
+          totalPacketSize = _calculateMetadataPacketSize(currentBytes, mDims);
+          if (totalPacketSize == null) {
+            // Not enough data yet to determine packet size
+            break;
+          }
+          
           debugPrint('📦 [TCP] Metadata packet detected: dims=$mDims, totalSize=$totalPacketSize');
           
         } else if (packetType == Protocol.packetTypeData) {
@@ -127,7 +132,7 @@ class TCPConn extends Protocol {
         }
 
         // Validate packet size
-        if (totalPacketSize == null || totalPacketSize <= 0 || totalPacketSize > 100000) {
+        if (totalPacketSize <= 0 || totalPacketSize > 100000) {
           debugPrint('⚠️ [TCP] Invalid packet size: $totalPacketSize - skipping byte');
           _skipOneByte(buffer, currentBytes);
           continue;
@@ -170,5 +175,35 @@ class TCPConn extends Protocol {
     } else {
       buffer.clear();
     }
+  }
+
+  /// Calculate the total size of a metadata packet with variable-length strings
+  /// Returns null if not enough data is available to determine the size
+  int? _calculateMetadataPacketSize(Uint8List bytes, int dimensions) {
+    int offset = Protocol.metadataHeaderSize; // Start after fixed header (12 bytes)
+    
+    // Sensor name: 1 byte length + string
+    if (offset >= bytes.length) return null;
+    int nameLen = bytes[offset];
+    offset += 1 + nameLen;
+    
+    // Labels: for each dimension, 1 byte length + string
+    for (int d = 0; d < dimensions; d++) {
+      if (offset >= bytes.length) return null;
+      int labelLen = bytes[offset];
+      offset += 1 + labelLen;
+    }
+    
+    // Units: for each dimension, 1 byte length + string
+    for (int d = 0; d < dimensions; d++) {
+      if (offset >= bytes.length) return null;
+      int unitLen = bytes[offset];
+      offset += 1 + unitLen;
+    }
+    
+    // MinSignals and MaxSignals: dims * 4 bytes each
+    offset += dimensions * 4 * 2;
+    
+    return offset;
   }
 }

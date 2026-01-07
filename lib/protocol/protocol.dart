@@ -294,6 +294,7 @@ abstract class Protocol extends ChangeNotifier {
     );
     
     notifyListeners();
+    connectionController.add(macAddress);
     debugPrint('✅ [$type] Data Packet: ${currentPacket.macAddress} [${currentPacket.data.length} samples]');
   }
 

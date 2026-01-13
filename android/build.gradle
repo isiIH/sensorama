@@ -10,6 +10,16 @@ subprojects {
     project.buildDir = "${rootProject.buildDir}/${project.name}"
 }
 subprojects {
+    if (project.name == 'isar_flutter_libs') {
+        afterEvaluate { project ->
+            project.android {
+                namespace 'dev.isar.isar_flutter_libs'
+                compileSdkVersion 34
+            }
+        }
+    }
+}
+subprojects {
     project.evaluationDependsOn(':app')
 }
 

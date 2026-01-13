@@ -11,6 +11,7 @@ import '../models/sensor_packet.dart';
 import 'sensor_legend.dart';
 
 // Imports de protocols
+import '../protocol/protocol.dart';
 import '../protocol/tcp_conn.dart';
 import '../protocol/udp_conn.dart';
 import '../protocol/ble_conn.dart';
@@ -23,9 +24,11 @@ class RealTimeChart extends StatefulWidget {
 }
 
 class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProviderStateMixin {
-  late final TCPConn _tcpConn;
-  late final UDPConn _udpConn;
-  late final BLEConn _bleConn;
+  final List<Protocol> connections = [
+    TCPConn(),
+    UDPConn(),
+    BLEConn(),
+  ];
   late final Ticker _ticker;
 
   final Map<String, SensorStream> _activeSensors = {};
@@ -45,13 +48,10 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
   @override
   void initState() {
     super.initState();
-    _tcpConn = TCPConn();
-    _udpConn = UDPConn();
-    _bleConn = BLEConn();
 
-    _tcpConn.addListener(_onNewSensorDataTCP);
-    _udpConn.addListener(_onNewSensorDataUDP);
-    _bleConn.addListener(_onNewSensorDataBLE);
+    for (var conn in connections) {
+      conn.addListener(() => _processSensorPacket(conn.currentPacket));
+    }
 
     _ticker = createTicker(_onTick);
     _ticker.start();
@@ -60,15 +60,11 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
   @override
   void dispose() {
     _ticker.dispose();
-    _tcpConn.removeListener(_onNewSensorDataTCP);
-    _udpConn.removeListener(_onNewSensorDataUDP);
-    _bleConn.removeListener(_onNewSensorDataBLE);
+    for (var conn in connections) {
+      conn.removeListener(() => _processSensorPacket(conn.currentPacket));
+    }
     super.dispose();
   }
-
-  void _onNewSensorDataTCP() => _processSensorPacket(_tcpConn.currentPacket);
-  void _onNewSensorDataUDP() => _processSensorPacket(_udpConn.currentPacket);
-  void _onNewSensorDataBLE() => _processSensorPacket(_bleConn.currentPacket);
 
   void _processSensorPacket(SensorPacket packet) {
     _globalStartTime ??= packet.data.first.timestamp;
@@ -225,6 +221,7 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
       padding: const EdgeInsets.all(16.0),
       child: Column(
         children: [
+          const SizedBox(height: 10),
           SensorLegend(
             activeSensors: _activeSensors,
             selectedSensorId: _selectedSensor,
@@ -232,7 +229,6 @@ class _RealTimeChartState extends State<RealTimeChart> with SingleTickerProvider
             onSensorSelected: (id) => setState(() => _selectedSensor = id),
             onMetricSelected: (metric) => setState(() => _selectedMetric = metric),
           ),
-          const SizedBox(height: 10),
           Expanded(
             child: LineChart(
               LineChartData(

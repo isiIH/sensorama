@@ -4,6 +4,8 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   connectivity_plus
+  flutter_blue_plus_winrt
+  isar_flutter_libs
   permission_handler_windows
 )
 

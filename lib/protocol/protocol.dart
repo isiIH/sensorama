@@ -25,6 +25,9 @@ abstract class Protocol extends ChangeNotifier {
   final connectionController = StreamController<String>.broadcast();
   Stream<String> get onClientConnected => connectionController.stream;
 
+  final _packetController = StreamController<Uint8List>.broadcast();
+  Stream<Uint8List> get onPacketReceived => _packetController.stream;
+
   Protocol(this.type);
 
   /// Maneja la conexión
@@ -48,6 +51,7 @@ abstract class Protocol extends ChangeNotifier {
   }
 
   void decodePacket(Uint8List bytes) {
+    _packetController.add(bytes);
     final buffer = ByteData.sublistView(bytes);
     int offset = 0;
 

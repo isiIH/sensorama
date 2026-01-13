@@ -22,6 +22,11 @@ class BLEConn extends Protocol {
 
   static const String _prefLastDeviceId = 'last_ble_device_id';
 
+  @override
+  Future<void> start() async {
+    restoreLastConnection();
+  }
+
   /// Llamar al iniciar la app para reconectar automáticamente
   Future<void> restoreLastConnection() async {
     final prefs = await SharedPreferences.getInstance();

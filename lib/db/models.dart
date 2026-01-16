@@ -8,6 +8,8 @@ class Session {
 
   String? patientName;
   DateTime? createdAt;
+
+  bool isFinished = false;
 }
 
 @collection

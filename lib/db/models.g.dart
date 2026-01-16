@@ -22,8 +22,13 @@ const SessionSchema = CollectionSchema(
       name: r'createdAt',
       type: IsarType.dateTime,
     ),
-    r'patientName': PropertySchema(
+    r'isFinished': PropertySchema(
       id: 1,
+      name: r'isFinished',
+      type: IsarType.bool,
+    ),
+    r'patientName': PropertySchema(
+      id: 2,
       name: r'patientName',
       type: IsarType.string,
     )
@@ -64,7 +69,8 @@ void _sessionSerialize(
   Map<Type, List<int>> allOffsets,
 ) {
   writer.writeDateTime(offsets[0], object.createdAt);
-  writer.writeString(offsets[1], object.patientName);
+  writer.writeBool(offsets[1], object.isFinished);
+  writer.writeString(offsets[2], object.patientName);
 }
 
 Session _sessionDeserialize(
@@ -76,7 +82,8 @@ Session _sessionDeserialize(
   final object = Session();
   object.createdAt = reader.readDateTimeOrNull(offsets[0]);
   object.id = id;
-  object.patientName = reader.readStringOrNull(offsets[1]);
+  object.isFinished = reader.readBool(offsets[1]);
+  object.patientName = reader.readStringOrNull(offsets[2]);
   return object;
 }
 
@@ -90,6 +97,8 @@ P _sessionDeserializeProp<P>(
     case 0:
       return (reader.readDateTimeOrNull(offset)) as P;
     case 1:
+      return (reader.readBool(offset)) as P;
+    case 2:
       return (reader.readStringOrNull(offset)) as P;
     default:
       throw IsarError('Unknown property with id $propertyId');
@@ -306,6 +315,16 @@ extension SessionQueryFilter
     });
   }
 
+  QueryBuilder<Session, Session, QAfterFilterCondition> isFinishedEqualTo(
+      bool value) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'isFinished',
+        value: value,
+      ));
+    });
+  }
+
   QueryBuilder<Session, Session, QAfterFilterCondition> patientNameIsNull() {
     return QueryBuilder.apply(this, (query) {
       return query.addFilterCondition(const FilterCondition.isNull(
@@ -473,6 +492,18 @@ extension SessionQuerySortBy on QueryBuilder<Session, Session, QSortBy> {
     });
   }
 
+  QueryBuilder<Session, Session, QAfterSortBy> sortByIsFinished() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'isFinished', Sort.asc);
+    });
+  }
+
+  QueryBuilder<Session, Session, QAfterSortBy> sortByIsFinishedDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'isFinished', Sort.desc);
+    });
+  }
+
   QueryBuilder<Session, Session, QAfterSortBy> sortByPatientName() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'patientName', Sort.asc);
@@ -512,6 +543,18 @@ extension SessionQuerySortThenBy
     });
   }
 
+  QueryBuilder<Session, Session, QAfterSortBy> thenByIsFinished() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'isFinished', Sort.asc);
+    });
+  }
+
+  QueryBuilder<Session, Session, QAfterSortBy> thenByIsFinishedDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'isFinished', Sort.desc);
+    });
+  }
+
   QueryBuilder<Session, Session, QAfterSortBy> thenByPatientName() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'patientName', Sort.asc);
@@ -530,6 +573,12 @@ extension SessionQueryWhereDistinct
   QueryBuilder<Session, Session, QDistinct> distinctByCreatedAt() {
     return QueryBuilder.apply(this, (query) {
       return query.addDistinctBy(r'createdAt');
+    });
+  }
+
+  QueryBuilder<Session, Session, QDistinct> distinctByIsFinished() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'isFinished');
     });
   }
 
@@ -552,6 +601,12 @@ extension SessionQueryProperty
   QueryBuilder<Session, DateTime?, QQueryOperations> createdAtProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'createdAt');
+    });
+  }
+
+  QueryBuilder<Session, bool, QQueryOperations> isFinishedProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'isFinished');
     });
   }
 

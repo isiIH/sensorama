@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:io';
-
 import 'package:isar/isar.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
 import 'package:msgpack_dart/msgpack_dart.dart' as msgpack;
@@ -15,16 +15,54 @@ class DataManager {
   DataManager._internal();
 
   late Future<Isar> db;
+  bool _isUploading = false;
 
-  // Variables de control
-  /*Timer? _flushTimer;
-  int _pendingCount = 0; // Contador de bloques en memoria/espera
-  final int _batchLimit = 50;
-  final Duration _timeLimit = const Duration(minutes: 1);*/
+  // Configuración de envío de datos
+  final int batchSize = 50;
+  final Duration syncInterval = Duration(seconds: 60);
+  Timer? _syncTimer;
 
-  // 1. INICIALIZACIÓN
   Future<void> init() async {
     db = _openDB();
+
+    await _findCrashedSessions();
+
+    Connectivity().onConnectivityChanged.listen((result) {
+      if (!result.contains(ConnectivityResult.none)) {
+        debugPrint("Conexión detectada: Reintentando envíos pendientes...");
+        _flush(sendAll: true);
+      }
+    });
+  }
+
+  Future<void> _findCrashedSessions() async {
+    final isar = await db;
+
+    final crashedSessions = await isar.sessions
+        .filter()
+        .isFinishedEqualTo(false)
+        .findAll();
+
+    if (crashedSessions.isNotEmpty) {
+      debugPrint("Se encontraron ${crashedSessions.length} sesiones sin cerrar. Cerrándolas...");
+
+      await isar.writeTxn(() async {
+        for (var session in crashedSessions) {
+          session.isFinished = true; // Forzamos el cierre
+          await isar.sessions.put(session);
+        }
+      });
+    }
+  }
+
+  void _resetSyncTimer() {
+    // Si ya hay uno corriendo, no creamos otro
+    if (_syncTimer?.isActive ?? false) return;
+
+    _syncTimer = Timer(syncInterval, () {
+      debugPrint("Inactividad detectada. Forzando limpieza...");
+      _flush(sendAll: true);
+    });
   }
 
   Future<Isar> _openDB() async {
@@ -38,7 +76,100 @@ class DataManager {
     return Future.value(Isar.getInstance());
   }
 
-  // 2. INICIAR UNA SESIÓN (Header)
+  // Sincronización
+  Future<void> _flush({bool sendAll = false}) async {
+    if (_isUploading) return;
+
+    // Chequeo rápido de conexión antes de enviar a la DB
+    final connectivity = await Connectivity().checkConnectivity();
+    if (connectivity[0] == ConnectivityResult.none) {
+      debugPrint("No hay conexión a Internet.");
+      return;
+    }
+
+    _isUploading = true;
+    _syncTimer?.cancel();
+    final isar = await db;
+
+    try {
+      while(true) {
+        // Obtener el bloque más antiguo (FIFO)
+        final batch = await isar.sessionDatas
+            .where()
+            .sortBySessionId()
+            .limit(batchSize)
+            .findAll();
+
+        if (batch.isEmpty) {
+          debugPrint("La base de datos está vacía");
+          return;
+        }
+
+        bool isPartialBatch = batch.length < batchSize;
+
+        if(!sendAll && isPartialBatch) {
+          debugPrint("No hay suficientes datos para enviar");
+          return;
+        }
+
+        // Agrupar por sesión (Map<SessionId, List<Payload>>)
+        final Map<int, List<SessionData>> batches = {};
+
+        for (var item in batch) {
+          if (!batches.containsKey(item.sessionId)) {
+            batches[item.sessionId] = [];
+          }
+          batches[item.sessionId]!.add(item);
+        }
+
+        // Procesar y enviar cada sesión
+        for (final sessionId in batches.keys) {
+          // Obtener info del paciente
+          final session = await isar.sessions.get(sessionId);
+
+          // Obtener datos (payload)
+          List<SessionData> data = batches[sessionId]!;
+          final payloadList = batches[sessionId]!.map((e) => e.data).toList();
+
+          // Preparar "Sobre" (Envelope)
+          final Map<String, dynamic> packet = {
+            'p': session!.patientName,
+            't': session.createdAt!.millisecondsSinceEpoch,
+            'd': payloadList, // List<List<int>>
+          };
+
+          // Serializar y Comprimir
+          final packed = msgpack.serialize(packet);
+          final compressed = GZipCodec().encode(packed);
+
+          // D. Intentar Enviar
+          bool success = await _sendToServer(compressed);
+
+          if (success) {
+            // ÉXITO: Borrar de local
+            await _deleteData(data, sessionId);
+            debugPrint(
+                "Lote $sessionId de ${payloadList.length} enviado y borrado.");
+          } else {
+            // FALLO: Reintentar en otro momento
+            debugPrint("Fallo al subir. Reintentando luego...");
+            _resetSyncTimer();
+            return;
+          }
+        }
+
+        // Base de datos vacía
+        if(sendAll && isPartialBatch) return;
+      }
+    } catch (e) {
+      debugPrint("Error crítico en sync: $e");
+      _resetSyncTimer();
+    } finally {
+      _isUploading = false;
+    }
+  }
+
+  // Inicializar sesión (Header)
   Future<int> startSession(String patientName) async {
     final isar = await db;
     final session = Session()
@@ -50,14 +181,13 @@ class DataManager {
       sessionId = await isar.sessions.put(session);
     });
 
-    // Iniciamos (o reiniciamos) el timer de seguridad de 1 minuto
-    //_resetTimer();
-
     return sessionId;
   }
 
-  // 3. AGREGAR DATOS (El corazón de la lógica)
+  // Agregar paquetes de datos (Body)
   Future<void> addData(int sessionId, List<int> rawData) async {
+    if(sessionId == 0) return;
+
     final isar = await db;
 
     final packet = SessionData()
@@ -68,119 +198,75 @@ class DataManager {
       await isar.sessionDatas.put(packet);
     });
 
-    /*_pendingCount++;
-
-    // --- TRIGGER 1: Por Cantidad ---
-    if (_pendingCount >= _batchLimit) {
-      debugPrint("Trigger: Límite de 50 alcanzado. Enviando...");
-      await _flush();
-    }*/
+    if (await isar.sessionDatas.count() >= batchSize) {
+      debugPrint("Límite de datos alcanzado. Enviando...");
+      _flush();
+    }
   }
 
-  // 4. FINALIZAR (Forzar envío al detener grabación)
-  Future<void> stopSession() async {
-    //_flushTimer?.cancel();
-    await _flush(); // Enviar lo que quede pendiente
-    debugPrint("Sesión finalizada y buffer vaciado.");
-  }
-
-  // 5. LÓGICA DE ENVÍO (FLUSH)
-  Future<void> _flush() async {
-    // Reseteamos el timer para que no se dispare de nuevo innecesariamente
-    //_resetTimer();
-
-    //if (_pendingCount == 0) return; // Nada que enviar
-
+  // Finalizar sesión y enviar al backend
+  Future<void> stopSession(int sessionId) async {
     final isar = await db;
 
-    // A. Buscar todos los datos pendientes ordenados
-    // Nota: Podrías filtrar por sessionId si quisieras, aquí enviamos TODO lo pendiente
-    final dataItems = await isar.sessionDatas.where().sortBySessionId().findAll();
+    final session = await isar.sessions.get(sessionId);
+    if(session != null) {
+      session.isFinished = true; // Marcamos como terminada
 
-    /*if (dataItems.isEmpty) {
-      _pendingCount = 0;
-      return;
-    }*/
-
-    // B. Agrupar por Sesión (Por si hay datos de sesiones viejas mezclados)
-    // Map<SessionId, List<Payload>>
-    final Map<int, List<List<int>>> batches = {};
-
-    for (var item in dataItems) {
-      if (!batches.containsKey(item.sessionId)) {
-        batches[item.sessionId] = [];
-      }
-      batches[item.sessionId]!.add(item.data);
+      await isar.writeTxn(() async {
+        await isar.sessions.put(session);
+      });
     }
 
-    // C. Procesar y Enviar cada grupo
-    for (final sessionId in batches.keys) {
-      final payloadList = batches[sessionId]!;
-
-      // Obtener info del paciente
-      final session = await isar.sessions.get(sessionId);
-      if (session == null) continue; // Caso raro: sesión borrada
-
-      // Preparar "Sobre" (Envelope)
-      final Map<String, dynamic> packet = {
-        'p': session.patientName,
-        't': session.createdAt?.millisecondsSinceEpoch ?? 0,
-        'd': payloadList, // Lista de Uint8List
-      };
-
-      // Serializar y Comprimir
-      final packed = msgpack.serialize(packet);
-      final compressed = GZipCodec().encode(packed);
-
-      // Enviar
-      bool sent = await _sendToServer(compressed);
-
-      if (sent) {
-        // Borrar SOLO los datos que acabamos de enviar de esta sesión
-        // Filtramos los IDs que pertenecen a esta sesión y estaban en la lista original
-        final idsToDelete = dataItems
-            .where((e) => e.sessionId == sessionId)
-            .map((e) => e.id)
-            .toList();
-
-        await isar.writeTxn(() async {
-          await isar.sessionDatas.deleteAll(idsToDelete);
-        });
-        debugPrint("Enviados ${idsToDelete.length} paquetes de sesión $sessionId");
-      }
-    }
-
-    // Resetear contador local
-    // (Nota: _pendingCount es una estimación en memoria, lo ponemos a 0 tras intentar enviar)
-    //_pendingCount = 0;
+    await _flush(sendAll: true); // Enviar lo que quede pendiente
   }
 
-  // 6. HELPER DE RED
+  Future<void> _deleteData(List<SessionData> batch, int sessionId) async {
+    final isar = await db;
+
+    // eliminar sensorData
+    final idsToDelete = batch
+        .map((e) => e.id)
+        .toList();
+    await isar.writeTxn(() async {
+      await isar.sessionDatas.deleteAll(idsToDelete);
+    });
+
+    // Contamos cuántos datos quedan para esta sesión
+    final remainingCount = await isar.sessionDatas
+        .filter()
+        .sessionIdEqualTo(sessionId)
+        .count();
+
+    // Obtenemos la cabecera para ver si ya terminó
+    final sessionHeader = await isar.sessions.get(sessionId);
+
+    // CONDICIÓN DE ORO:
+    if (remainingCount == 0 && (sessionHeader?.isFinished == true)) {
+      debugPrint("Limpieza total: Borrando cabecera de sesión $sessionId");
+
+      await isar.writeTxn(() async {
+        await isar.sessions.delete(sessionId);
+      });
+    }
+  }
+
+  // Post de datos al backend
   Future<bool> _sendToServer(List<int> bodyBytes) async {
     try {
       final response = await http.post(
-        Uri.parse('https://api.tu-servidor.com/upload'),
+        Uri.parse('http://192.168.4.228:8000/upload'),
         headers: {
           'Content-Type': 'application/x-msgpack',
           'Content-Encoding': 'gzip',
         },
         body: bodyBytes
-      );
-      //return response.statusCode == 200;
-      return false;
+      ).timeout(Duration(seconds: 10));
+
+      return response.statusCode == 200;
     } catch (e) {
+
       debugPrint("Error de red: $e");
       return false;
     }
   }
-
-  // 7. GESTIÓN DEL TIMER
-  /*void _resetTimer() {
-    _flushTimer?.cancel();
-    // --- TRIGGER 2: Por Tiempo ---
-    _flushTimer = Timer(_timeLimit, () {
-      debugPrint("Trigger: Tiempo límite (1 min) alcanzado. Enviando...");
-      _flush();
-    });
-  }*/
 }

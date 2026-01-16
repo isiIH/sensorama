@@ -36,7 +36,7 @@ class _RecordButtonState extends State<RecordButton> {
         if (!_isRecording) return;
 
         // Si estamos grabando, guardamos en la BD
-        dataManager.addData(currentSessionId, bytes);
+        dataManager.addData(currentSessionId, bytes.toList());
       });
 
       _subscriptions.add(sub);
@@ -64,7 +64,7 @@ class _RecordButtonState extends State<RecordButton> {
 
     } else {
       debugPrint("🛑 Grabación detenida.");
-      await dataManager.stopSession();
+      await dataManager.stopSession(currentSessionId);
       currentSessionId = 0;
     }
   }

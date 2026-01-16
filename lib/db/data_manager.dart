@@ -6,6 +6,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
 import 'package:msgpack_dart/msgpack_dart.dart' as msgpack;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'models.dart';
 
@@ -253,8 +254,10 @@ class DataManager {
   // Post de datos al backend
   Future<bool> _sendToServer(List<int> bodyBytes) async {
     try {
+      final host = dotenv.env['BACKEND_HOST'];
+      final port = dotenv.env['BACKEND_PORT'];
       final response = await http.post(
-        Uri.parse('http://192.168.4.228:8000/upload'),
+        Uri.parse('http://$host:$port/upload'),
         headers: {
           'Content-Type': 'application/x-msgpack',
           'Content-Encoding': 'gzip',

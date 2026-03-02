@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:io';
@@ -5,41 +6,45 @@ import 'package:isar/isar.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
-import 'package:msgpack_dart/msgpack_dart.dart' as msgpack;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'models.dart';
+import 'binary_file_manager.dart';
 
 class DataManager {
   // Singleton para acceder fácil desde cualquier lado
   static final DataManager instance = DataManager._internal();
   DataManager._internal();
 
-  late Future<Isar> db;
+  late Isar _isar;
   bool _isUploading = false;
 
+  final fileManager = BinaryFileManager();
+  int currentSessionId = 0;
+  String currentFileName = "";
+
   // Configuración de envío de datos
-  final int batchSize = 50;
+  final int batchSize = 500;
+  late int fileCounter = 0;
   final Duration syncInterval = Duration(seconds: 60);
   Timer? _syncTimer;
 
   Future<void> init() async {
-    db = _openDB();
+    _isar = await _openDB();
 
     await _findCrashedSessions();
 
     Connectivity().onConnectivityChanged.listen((result) {
       if (!result.contains(ConnectivityResult.none)) {
         debugPrint("Conexión detectada: Reintentando envíos pendientes...");
-        _flush(sendAll: true);
+        _flush();
       }
     });
   }
 
   Future<void> _findCrashedSessions() async {
-    final isar = await db;
 
-    final crashedSessions = await isar.sessions
+    final crashedSessions = await _isar.sessions
         .filter()
         .isFinishedEqualTo(false)
         .findAll();
@@ -47,10 +52,10 @@ class DataManager {
     if (crashedSessions.isNotEmpty) {
       debugPrint("Se encontraron ${crashedSessions.length} sesiones sin cerrar. Cerrándolas...");
 
-      await isar.writeTxn(() async {
+      await _isar.writeTxn(() async {
         for (var session in crashedSessions) {
           session.isFinished = true; // Forzamos el cierre
-          await isar.sessions.put(session);
+          await _isar.sessions.put(session);
         }
       });
     }
@@ -62,7 +67,7 @@ class DataManager {
 
     _syncTimer = Timer(syncInterval, () {
       debugPrint("Inactividad detectada. Forzando limpieza...");
-      _flush(sendAll: true);
+      _flush();
     });
   }
 
@@ -77,8 +82,9 @@ class DataManager {
     return Future.value(Isar.getInstance());
   }
 
-  // Sincronización
-  Future<void> _flush({bool sendAll = false}) async {
+  /* Sincronización con el servidor, envía los datos pendientes
+   */
+  Future<void> _flush() async {
     if (_isUploading) return;
 
     // Chequeo rápido de conexión antes de enviar a la DB
@@ -90,77 +96,38 @@ class DataManager {
 
     _isUploading = true;
     _syncTimer?.cancel();
-    final isar = await db;
 
     try {
       while(true) {
         // Obtener el bloque más antiguo (FIFO)
-        final batch = await isar.sessionDatas
+        final pendingChunks = await _isar.sessionDatas
             .where()
-            .sortBySessionId()
+            .sortByFileName()
             .limit(batchSize)
             .findAll();
 
-        if (batch.isEmpty) {
+        if (pendingChunks.isEmpty) {
           debugPrint("La base de datos está vacía");
           return;
         }
 
-        bool isPartialBatch = batch.length < batchSize;
+        for (final chunk in pendingChunks) {
+          if (chunk.fileName == currentFileName) continue;
 
-        if(!sendAll && isPartialBatch) {
-          debugPrint("No hay suficientes datos para enviar");
-          return;
-        }
-
-        // Agrupar por sesión (Map<SessionId, List<Payload>>)
-        final Map<int, List<SessionData>> batches = {};
-
-        for (var item in batch) {
-          if (!batches.containsKey(item.sessionId)) {
-            batches[item.sessionId] = [];
-          }
-          batches[item.sessionId]!.add(item);
-        }
-
-        // Procesar y enviar cada sesión
-        for (final sessionId in batches.keys) {
-          // Obtener info del paciente
-          final session = await isar.sessions.get(sessionId);
-
-          // Obtener datos (payload)
-          List<SessionData> data = batches[sessionId]!;
-          final payloadList = batches[sessionId]!.map((e) => e.data).toList();
-
-          // Preparar "Sobre" (Envelope)
-          final Map<String, dynamic> packet = {
-            'p': session!.patientName,
-            't': session.createdAt!.millisecondsSinceEpoch,
-            'd': payloadList, // List<List<int>>
-          };
-
-          // Serializar y Comprimir
-          final packed = msgpack.serialize(packet);
-          final compressed = GZipCodec().encode(packed);
-
-          // D. Intentar Enviar
-          bool success = await _sendToServer(compressed);
+          bool success = await _sendToServer(chunk);
 
           if (success) {
             // ÉXITO: Borrar de local
-            await _deleteData(data, sessionId);
+            await _deleteData(chunk);
             debugPrint(
-                "Lote $sessionId de ${payloadList.length} enviado y borrado.");
+                "Archivo ${chunk.fileName} enviado y borrado.");
           } else {
             // FALLO: Reintentar en otro momento
             debugPrint("Fallo al subir. Reintentando luego...");
             _resetSyncTimer();
-            return;
+            break;
           }
         }
-
-        // Base de datos vacía
-        if(sendAll && isPartialBatch) return;
       }
     } catch (e) {
       debugPrint("Error crítico en sync: $e");
@@ -170,100 +137,133 @@ class DataManager {
     }
   }
 
-  // Inicializar sesión (Header)
-  Future<int> startSession(String patientName) async {
-    final isar = await db;
+  // Inicializar una sesión y crear el archivo binario
+  Future<void> startSession(String patientName) async {
     final session = Session()
       ..patientName = patientName
       ..createdAt = DateTime.now();
 
-    late int sessionId;
-    await isar.writeTxn(() async {
-      sessionId = await isar.sessions.put(session);
+    await _isar.writeTxn(() async {
+      await _isar.sessions.put(session);
     });
 
-    return sessionId;
+    currentSessionId = session.id;
+    fileCounter = 0;
+    currentFileName = "";
   }
 
-  // Agregar paquetes de datos (Body)
-  Future<void> addData(int sessionId, List<int> rawData) async {
-    if(sessionId == 0) return;
+  // Agregar paquetes de datos al archivo binario
+  Future<void> addData(Uint8List rawData) async {
+    if(currentSessionId == 0) return;
 
-    final isar = await db;
+    if (currentFileName.isEmpty) {
+      currentFileName = 'session${currentSessionId}_${DateTime.now().millisecondsSinceEpoch}.bin';
 
-    final packet = SessionData()
-      ..sessionId = sessionId
-      ..data = rawData;
+      // Disparamos el guardado en Isar en segundo plano sin usar 'await'
+      // Esto libera el hilo principal para que no haya lag.
+      _createNewChunk();
+    }
 
-    await isar.writeTxn(() async {
-      await isar.sessionDatas.put(packet);
-    });
+    fileManager.writeChunk(currentFileName, rawData);
+    fileCounter++;
 
-    if (await isar.sessionDatas.count() >= batchSize) {
-      debugPrint("Límite de datos alcanzado. Enviando...");
+    // Si alcanza el límite de datos para el archivo actual, se envía
+    if(fileCounter >= batchSize) {
+      debugPrint("Límite de archivos alcanzado. Enviando...");
+      fileCounter = 0;
+      currentFileName = "";
       _flush();
     }
   }
 
-  // Finalizar sesión y enviar al backend
-  Future<void> stopSession(int sessionId) async {
-    final isar = await db;
+  // Crear nueva fila de datos asociado a un archivo .bin
+  Future<void> _createNewChunk() async {
+    final session = await _isar.sessions.get(currentSessionId);
 
-    final session = await isar.sessions.get(sessionId);
+    final newSessionData = SessionData()
+      ..session.value = session
+      ..fileName = currentFileName;
+
+    await _isar.writeTxn(() async {
+      await _isar.sessionDatas.put(newSessionData);
+      await newSessionData.session.save();
+    });
+  }
+
+  // Finalizar sesión y enviar al backend
+  Future<void> stopSession() async {
+    final session = await _isar.sessions.get(currentSessionId);
     if(session != null) {
       session.isFinished = true; // Marcamos como terminada
 
-      await isar.writeTxn(() async {
-        await isar.sessions.put(session);
+      await _isar.writeTxn(() async {
+        await _isar.sessions.put(session);
       });
     }
 
-    await _flush(sendAll: true); // Enviar lo que quede pendiente
+    currentSessionId = 0;
+    currentFileName = "";
+
+    await _flush(); // Enviar lo que quede pendiente
   }
 
-  Future<void> _deleteData(List<SessionData> batch, int sessionId) async {
-    final isar = await db;
-
-    // eliminar sensorData
-    final idsToDelete = batch
-        .map((e) => e.id)
-        .toList();
-    await isar.writeTxn(() async {
-      await isar.sessionDatas.deleteAll(idsToDelete);
+  Future<void> _deleteData(SessionData chunk) async {
+    // Eliminar chunk y archivo correspondiente de local
+    await fileManager.deleteFile(chunk.fileName);
+    await _isar.writeTxn(() async {
+      await _isar.sessionDatas.delete(chunk.id);
     });
 
     // Contamos cuántos datos quedan para esta sesión
-    final remainingCount = await isar.sessionDatas
-        .filter()
-        .sessionIdEqualTo(sessionId)
-        .count();
+    final session = chunk.session.value!;
+    final remainingCount = await session.sessionDatas.count();
 
-    // Obtenemos la cabecera para ver si ya terminó
-    final sessionHeader = await isar.sessions.get(sessionId);
+    if (remainingCount == 0 && session.isFinished == true) {
+      debugPrint("Limpieza total: Borrando cabecera de sesión ${session.id}");
 
-    // CONDICIÓN DE ORO:
-    if (remainingCount == 0 && (sessionHeader?.isFinished == true)) {
-      debugPrint("Limpieza total: Borrando cabecera de sesión $sessionId");
-
-      await isar.writeTxn(() async {
-        await isar.sessions.delete(sessionId);
+      await _isar.writeTxn(() async {
+        await _isar.sessions.delete(session.id);
       });
     }
   }
 
   // Post de datos al backend
-  Future<bool> _sendToServer(List<int> bodyBytes) async {
+  Future<bool> _sendToServer(SessionData chunk) async {
     try {
+      final rawBytes = await fileManager.getFile(chunk.fileName);
+
+      if (rawBytes == null) {
+        debugPrint('El archivo no existe localmente.');
+        return false;
+      }
+
+      // Comprimir archivo con gzip
+      final compressedBytes = gzip.encode(rawBytes);
+
       final host = dotenv.env['BACKEND_HOST'];
       final port = dotenv.env['BACKEND_PORT'];
-      final response = await http.post(
-        Uri.parse('http://$host:$port/upload'),
-        headers: {
-          'Content-Type': 'application/x-msgpack',
-          'Content-Encoding': 'gzip',
-        },
-        body: bodyBytes
-      ).timeout(Duration(seconds: 10));
+      final request = http.MultipartRequest(
+          'POST',
+          Uri.parse('http://$host:$port/upload')
+      );
+
+      // Metadatos cruciales para ensamblar en el backend
+      request.fields['session_id'] = chunk.session.value!.id.toString();
+      request.fields['chunk_id'] = chunk.id.toString();
+      // Indicamos al servidor que el contenido viene comprimido
+      request.fields['compression'] = 'gzip';
+
+      // Adjuntar los bytes comprimidos como un archivo
+      request.files.add(
+          http.MultipartFile.fromBytes(
+            'file',
+            compressedBytes,
+            filename: '${chunk.fileName}.gz', // Extensión .gz para claridad
+          )
+      );
+
+      // 6. Ejecutar la subida de forma eficiente
+      final response = await request.send();
 
       return response.statusCode == 200;
     } catch (e) {

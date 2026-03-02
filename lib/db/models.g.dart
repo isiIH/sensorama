@@ -39,7 +39,15 @@ const SessionSchema = CollectionSchema(
   deserializeProp: _sessionDeserializeProp,
   idName: r'id',
   indexes: {},
-  links: {},
+  links: {
+    r'sessionDatas': LinkSchema(
+      id: 2362423111440730869,
+      name: r'sessionDatas',
+      target: r'SessionData',
+      single: false,
+      linkName: r'session',
+    )
+  },
   embeddedSchemas: {},
   getId: _sessionGetId,
   getLinks: _sessionGetLinks,
@@ -110,11 +118,13 @@ Id _sessionGetId(Session object) {
 }
 
 List<IsarLinkBase<dynamic>> _sessionGetLinks(Session object) {
-  return [];
+  return [object.sessionDatas];
 }
 
 void _sessionAttach(IsarCollection<dynamic> col, Id id, Session object) {
   object.id = id;
+  object.sessionDatas
+      .attach(col, col.isar.collection<SessionData>(), r'sessionDatas', id);
 }
 
 extension SessionQueryWhereSort on QueryBuilder<Session, Session, QWhere> {
@@ -477,7 +487,67 @@ extension SessionQueryObject
     on QueryBuilder<Session, Session, QFilterCondition> {}
 
 extension SessionQueryLinks
-    on QueryBuilder<Session, Session, QFilterCondition> {}
+    on QueryBuilder<Session, Session, QFilterCondition> {
+  QueryBuilder<Session, Session, QAfterFilterCondition> sessionDatas(
+      FilterQuery<SessionData> q) {
+    return QueryBuilder.apply(this, (query) {
+      return query.link(q, r'sessionDatas');
+    });
+  }
+
+  QueryBuilder<Session, Session, QAfterFilterCondition>
+      sessionDatasLengthEqualTo(int length) {
+    return QueryBuilder.apply(this, (query) {
+      return query.linkLength(r'sessionDatas', length, true, length, true);
+    });
+  }
+
+  QueryBuilder<Session, Session, QAfterFilterCondition> sessionDatasIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.linkLength(r'sessionDatas', 0, true, 0, true);
+    });
+  }
+
+  QueryBuilder<Session, Session, QAfterFilterCondition>
+      sessionDatasIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.linkLength(r'sessionDatas', 0, false, 999999, true);
+    });
+  }
+
+  QueryBuilder<Session, Session, QAfterFilterCondition>
+      sessionDatasLengthLessThan(
+    int length, {
+    bool include = false,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.linkLength(r'sessionDatas', 0, true, length, include);
+    });
+  }
+
+  QueryBuilder<Session, Session, QAfterFilterCondition>
+      sessionDatasLengthGreaterThan(
+    int length, {
+    bool include = false,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.linkLength(r'sessionDatas', length, include, 999999, true);
+    });
+  }
+
+  QueryBuilder<Session, Session, QAfterFilterCondition>
+      sessionDatasLengthBetween(
+    int lower,
+    int upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.linkLength(
+          r'sessionDatas', lower, includeLower, upper, includeUpper);
+    });
+  }
+}
 
 extension SessionQuerySortBy on QueryBuilder<Session, Session, QSortBy> {
   QueryBuilder<Session, Session, QAfterSortBy> sortByCreatedAt() {
@@ -628,15 +698,10 @@ const SessionDataSchema = CollectionSchema(
   name: r'SessionData',
   id: 7223334170416996232,
   properties: {
-    r'data': PropertySchema(
+    r'fileName': PropertySchema(
       id: 0,
-      name: r'data',
-      type: IsarType.longList,
-    ),
-    r'sessionId': PropertySchema(
-      id: 1,
-      name: r'sessionId',
-      type: IsarType.long,
+      name: r'fileName',
+      type: IsarType.string,
     )
   },
   estimateSize: _sessionDataEstimateSize,
@@ -644,22 +709,15 @@ const SessionDataSchema = CollectionSchema(
   deserialize: _sessionDataDeserialize,
   deserializeProp: _sessionDataDeserializeProp,
   idName: r'id',
-  indexes: {
-    r'sessionId': IndexSchema(
-      id: 6949518585047923839,
-      name: r'sessionId',
-      unique: false,
-      replace: false,
-      properties: [
-        IndexPropertySchema(
-          name: r'sessionId',
-          type: IndexType.value,
-          caseSensitive: false,
-        )
-      ],
+  indexes: {},
+  links: {
+    r'session': LinkSchema(
+      id: -1850497715188477709,
+      name: r'session',
+      target: r'Session',
+      single: true,
     )
   },
-  links: {},
   embeddedSchemas: {},
   getId: _sessionDataGetId,
   getLinks: _sessionDataGetLinks,
@@ -673,7 +731,7 @@ int _sessionDataEstimateSize(
   Map<Type, List<int>> allOffsets,
 ) {
   var bytesCount = offsets.last;
-  bytesCount += 3 + object.data.length * 8;
+  bytesCount += 3 + object.fileName.length * 3;
   return bytesCount;
 }
 
@@ -683,8 +741,7 @@ void _sessionDataSerialize(
   List<int> offsets,
   Map<Type, List<int>> allOffsets,
 ) {
-  writer.writeLongList(offsets[0], object.data);
-  writer.writeLong(offsets[1], object.sessionId);
+  writer.writeString(offsets[0], object.fileName);
 }
 
 SessionData _sessionDataDeserialize(
@@ -694,9 +751,8 @@ SessionData _sessionDataDeserialize(
   Map<Type, List<int>> allOffsets,
 ) {
   final object = SessionData();
-  object.data = reader.readLongList(offsets[0]) ?? [];
+  object.fileName = reader.readString(offsets[0]);
   object.id = id;
-  object.sessionId = reader.readLong(offsets[1]);
   return object;
 }
 
@@ -708,9 +764,7 @@ P _sessionDataDeserializeProp<P>(
 ) {
   switch (propertyId) {
     case 0:
-      return (reader.readLongList(offset) ?? []) as P;
-    case 1:
-      return (reader.readLong(offset)) as P;
+      return (reader.readString(offset)) as P;
     default:
       throw IsarError('Unknown property with id $propertyId');
   }
@@ -721,12 +775,13 @@ Id _sessionDataGetId(SessionData object) {
 }
 
 List<IsarLinkBase<dynamic>> _sessionDataGetLinks(SessionData object) {
-  return [];
+  return [object.session];
 }
 
 void _sessionDataAttach(
     IsarCollection<dynamic> col, Id id, SessionData object) {
   object.id = id;
+  object.session.attach(col, col.isar.collection<Session>(), r'session', id);
 }
 
 extension SessionDataQueryWhereSort
@@ -734,14 +789,6 @@ extension SessionDataQueryWhereSort
   QueryBuilder<SessionData, SessionData, QAfterWhere> anyId() {
     return QueryBuilder.apply(this, (query) {
       return query.addWhereClause(const IdWhereClause.any());
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterWhere> anySessionId() {
-    return QueryBuilder.apply(this, (query) {
-      return query.addWhereClause(
-        const IndexWhereClause.any(indexName: r'sessionId'),
-      );
     });
   }
 }
@@ -813,242 +860,142 @@ extension SessionDataQueryWhere
       ));
     });
   }
-
-  QueryBuilder<SessionData, SessionData, QAfterWhereClause> sessionIdEqualTo(
-      int sessionId) {
-    return QueryBuilder.apply(this, (query) {
-      return query.addWhereClause(IndexWhereClause.equalTo(
-        indexName: r'sessionId',
-        value: [sessionId],
-      ));
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterWhereClause> sessionIdNotEqualTo(
-      int sessionId) {
-    return QueryBuilder.apply(this, (query) {
-      if (query.whereSort == Sort.asc) {
-        return query
-            .addWhereClause(IndexWhereClause.between(
-              indexName: r'sessionId',
-              lower: [],
-              upper: [sessionId],
-              includeUpper: false,
-            ))
-            .addWhereClause(IndexWhereClause.between(
-              indexName: r'sessionId',
-              lower: [sessionId],
-              includeLower: false,
-              upper: [],
-            ));
-      } else {
-        return query
-            .addWhereClause(IndexWhereClause.between(
-              indexName: r'sessionId',
-              lower: [sessionId],
-              includeLower: false,
-              upper: [],
-            ))
-            .addWhereClause(IndexWhereClause.between(
-              indexName: r'sessionId',
-              lower: [],
-              upper: [sessionId],
-              includeUpper: false,
-            ));
-      }
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterWhereClause>
-      sessionIdGreaterThan(
-    int sessionId, {
-    bool include = false,
-  }) {
-    return QueryBuilder.apply(this, (query) {
-      return query.addWhereClause(IndexWhereClause.between(
-        indexName: r'sessionId',
-        lower: [sessionId],
-        includeLower: include,
-        upper: [],
-      ));
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterWhereClause> sessionIdLessThan(
-    int sessionId, {
-    bool include = false,
-  }) {
-    return QueryBuilder.apply(this, (query) {
-      return query.addWhereClause(IndexWhereClause.between(
-        indexName: r'sessionId',
-        lower: [],
-        upper: [sessionId],
-        includeUpper: include,
-      ));
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterWhereClause> sessionIdBetween(
-    int lowerSessionId,
-    int upperSessionId, {
-    bool includeLower = true,
-    bool includeUpper = true,
-  }) {
-    return QueryBuilder.apply(this, (query) {
-      return query.addWhereClause(IndexWhereClause.between(
-        indexName: r'sessionId',
-        lower: [lowerSessionId],
-        includeLower: includeLower,
-        upper: [upperSessionId],
-        includeUpper: includeUpper,
-      ));
-    });
-  }
 }
 
 extension SessionDataQueryFilter
     on QueryBuilder<SessionData, SessionData, QFilterCondition> {
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataElementEqualTo(int value) {
+  QueryBuilder<SessionData, SessionData, QAfterFilterCondition> fileNameEqualTo(
+    String value, {
+    bool caseSensitive = true,
+  }) {
     return QueryBuilder.apply(this, (query) {
       return query.addFilterCondition(FilterCondition.equalTo(
-        property: r'data',
+        property: r'fileName',
         value: value,
+        caseSensitive: caseSensitive,
       ));
     });
   }
 
   QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataElementGreaterThan(
-    int value, {
+      fileNameGreaterThan(
+    String value, {
     bool include = false,
+    bool caseSensitive = true,
   }) {
     return QueryBuilder.apply(this, (query) {
       return query.addFilterCondition(FilterCondition.greaterThan(
         include: include,
-        property: r'data',
+        property: r'fileName',
         value: value,
+        caseSensitive: caseSensitive,
       ));
     });
   }
 
   QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataElementLessThan(
-    int value, {
+      fileNameLessThan(
+    String value, {
     bool include = false,
+    bool caseSensitive = true,
   }) {
     return QueryBuilder.apply(this, (query) {
       return query.addFilterCondition(FilterCondition.lessThan(
         include: include,
-        property: r'data',
+        property: r'fileName',
         value: value,
+        caseSensitive: caseSensitive,
       ));
     });
   }
 
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataElementBetween(
-    int lower,
-    int upper, {
+  QueryBuilder<SessionData, SessionData, QAfterFilterCondition> fileNameBetween(
+    String lower,
+    String upper, {
     bool includeLower = true,
     bool includeUpper = true,
+    bool caseSensitive = true,
   }) {
     return QueryBuilder.apply(this, (query) {
       return query.addFilterCondition(FilterCondition.between(
-        property: r'data',
+        property: r'fileName',
         lower: lower,
         includeLower: includeLower,
         upper: upper,
         includeUpper: includeUpper,
+        caseSensitive: caseSensitive,
       ));
     });
   }
 
   QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataLengthEqualTo(int length) {
-    return QueryBuilder.apply(this, (query) {
-      return query.listLength(
-        r'data',
-        length,
-        true,
-        length,
-        true,
-      );
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition> dataIsEmpty() {
-    return QueryBuilder.apply(this, (query) {
-      return query.listLength(
-        r'data',
-        0,
-        true,
-        0,
-        true,
-      );
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataIsNotEmpty() {
-    return QueryBuilder.apply(this, (query) {
-      return query.listLength(
-        r'data',
-        0,
-        false,
-        999999,
-        true,
-      );
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataLengthLessThan(
-    int length, {
-    bool include = false,
+      fileNameStartsWith(
+    String value, {
+    bool caseSensitive = true,
   }) {
     return QueryBuilder.apply(this, (query) {
-      return query.listLength(
-        r'data',
-        0,
-        true,
-        length,
-        include,
-      );
+      return query.addFilterCondition(FilterCondition.startsWith(
+        property: r'fileName',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
     });
   }
 
   QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataLengthGreaterThan(
-    int length, {
-    bool include = false,
+      fileNameEndsWith(
+    String value, {
+    bool caseSensitive = true,
   }) {
     return QueryBuilder.apply(this, (query) {
-      return query.listLength(
-        r'data',
-        length,
-        include,
-        999999,
-        true,
-      );
+      return query.addFilterCondition(FilterCondition.endsWith(
+        property: r'fileName',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
     });
   }
 
   QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      dataLengthBetween(
-    int lower,
-    int upper, {
-    bool includeLower = true,
-    bool includeUpper = true,
-  }) {
+      fileNameContains(String value, {bool caseSensitive = true}) {
     return QueryBuilder.apply(this, (query) {
-      return query.listLength(
-        r'data',
-        lower,
-        includeLower,
-        upper,
-        includeUpper,
-      );
+      return query.addFilterCondition(FilterCondition.contains(
+        property: r'fileName',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<SessionData, SessionData, QAfterFilterCondition> fileNameMatches(
+      String pattern,
+      {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.matches(
+        property: r'fileName',
+        wildcard: pattern,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
+      fileNameIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'fileName',
+        value: '',
+      ));
+    });
+  }
+
+  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
+      fileNameIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        property: r'fileName',
+        value: '',
+      ));
     });
   }
 
@@ -1104,87 +1051,57 @@ extension SessionDataQueryFilter
       ));
     });
   }
-
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      sessionIdEqualTo(int value) {
-    return QueryBuilder.apply(this, (query) {
-      return query.addFilterCondition(FilterCondition.equalTo(
-        property: r'sessionId',
-        value: value,
-      ));
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      sessionIdGreaterThan(
-    int value, {
-    bool include = false,
-  }) {
-    return QueryBuilder.apply(this, (query) {
-      return query.addFilterCondition(FilterCondition.greaterThan(
-        include: include,
-        property: r'sessionId',
-        value: value,
-      ));
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      sessionIdLessThan(
-    int value, {
-    bool include = false,
-  }) {
-    return QueryBuilder.apply(this, (query) {
-      return query.addFilterCondition(FilterCondition.lessThan(
-        include: include,
-        property: r'sessionId',
-        value: value,
-      ));
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
-      sessionIdBetween(
-    int lower,
-    int upper, {
-    bool includeLower = true,
-    bool includeUpper = true,
-  }) {
-    return QueryBuilder.apply(this, (query) {
-      return query.addFilterCondition(FilterCondition.between(
-        property: r'sessionId',
-        lower: lower,
-        includeLower: includeLower,
-        upper: upper,
-        includeUpper: includeUpper,
-      ));
-    });
-  }
 }
 
 extension SessionDataQueryObject
     on QueryBuilder<SessionData, SessionData, QFilterCondition> {}
 
 extension SessionDataQueryLinks
-    on QueryBuilder<SessionData, SessionData, QFilterCondition> {}
-
-extension SessionDataQuerySortBy
-    on QueryBuilder<SessionData, SessionData, QSortBy> {
-  QueryBuilder<SessionData, SessionData, QAfterSortBy> sortBySessionId() {
+    on QueryBuilder<SessionData, SessionData, QFilterCondition> {
+  QueryBuilder<SessionData, SessionData, QAfterFilterCondition> session(
+      FilterQuery<Session> q) {
     return QueryBuilder.apply(this, (query) {
-      return query.addSortBy(r'sessionId', Sort.asc);
+      return query.link(q, r'session');
     });
   }
 
-  QueryBuilder<SessionData, SessionData, QAfterSortBy> sortBySessionIdDesc() {
+  QueryBuilder<SessionData, SessionData, QAfterFilterCondition>
+      sessionIsNull() {
     return QueryBuilder.apply(this, (query) {
-      return query.addSortBy(r'sessionId', Sort.desc);
+      return query.linkLength(r'session', 0, true, 0, true);
+    });
+  }
+}
+
+extension SessionDataQuerySortBy
+    on QueryBuilder<SessionData, SessionData, QSortBy> {
+  QueryBuilder<SessionData, SessionData, QAfterSortBy> sortByFileName() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'fileName', Sort.asc);
+    });
+  }
+
+  QueryBuilder<SessionData, SessionData, QAfterSortBy> sortByFileNameDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'fileName', Sort.desc);
     });
   }
 }
 
 extension SessionDataQuerySortThenBy
     on QueryBuilder<SessionData, SessionData, QSortThenBy> {
+  QueryBuilder<SessionData, SessionData, QAfterSortBy> thenByFileName() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'fileName', Sort.asc);
+    });
+  }
+
+  QueryBuilder<SessionData, SessionData, QAfterSortBy> thenByFileNameDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'fileName', Sort.desc);
+    });
+  }
+
   QueryBuilder<SessionData, SessionData, QAfterSortBy> thenById() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'id', Sort.asc);
@@ -1196,31 +1113,14 @@ extension SessionDataQuerySortThenBy
       return query.addSortBy(r'id', Sort.desc);
     });
   }
-
-  QueryBuilder<SessionData, SessionData, QAfterSortBy> thenBySessionId() {
-    return QueryBuilder.apply(this, (query) {
-      return query.addSortBy(r'sessionId', Sort.asc);
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QAfterSortBy> thenBySessionIdDesc() {
-    return QueryBuilder.apply(this, (query) {
-      return query.addSortBy(r'sessionId', Sort.desc);
-    });
-  }
 }
 
 extension SessionDataQueryWhereDistinct
     on QueryBuilder<SessionData, SessionData, QDistinct> {
-  QueryBuilder<SessionData, SessionData, QDistinct> distinctByData() {
+  QueryBuilder<SessionData, SessionData, QDistinct> distinctByFileName(
+      {bool caseSensitive = true}) {
     return QueryBuilder.apply(this, (query) {
-      return query.addDistinctBy(r'data');
-    });
-  }
-
-  QueryBuilder<SessionData, SessionData, QDistinct> distinctBySessionId() {
-    return QueryBuilder.apply(this, (query) {
-      return query.addDistinctBy(r'sessionId');
+      return query.addDistinctBy(r'fileName', caseSensitive: caseSensitive);
     });
   }
 }
@@ -1233,15 +1133,9 @@ extension SessionDataQueryProperty
     });
   }
 
-  QueryBuilder<SessionData, List<int>, QQueryOperations> dataProperty() {
+  QueryBuilder<SessionData, String, QQueryOperations> fileNameProperty() {
     return QueryBuilder.apply(this, (query) {
-      return query.addPropertyName(r'data');
-    });
-  }
-
-  QueryBuilder<SessionData, int, QQueryOperations> sessionIdProperty() {
-    return QueryBuilder.apply(this, (query) {
-      return query.addPropertyName(r'sessionId');
+      return query.addPropertyName(r'fileName');
     });
   }
 }

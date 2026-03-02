@@ -10,14 +10,16 @@ class Session {
   DateTime? createdAt;
 
   bool isFinished = false;
+
+  @Backlink(to: 'session')
+  final sessionDatas = IsarLinks<SessionData>();
 }
 
 @collection
 class SessionData {
   Id id = Isar.autoIncrement;
 
-  @Index()
-  late int sessionId; // Referencia al ID de Session
+  final session = IsarLink<Session>();
 
-  late List<int> data;
+  late String fileName; // Nombre del archivo binario con los datos crudos
 }

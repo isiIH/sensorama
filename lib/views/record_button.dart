@@ -18,7 +18,6 @@ class _RecordButtonState extends State<RecordButton> {
   final List<StreamSubscription> _subscriptions = [];
 
   final String patientName = "Patient 1";
-  int currentSessionId = 0;
   bool _isRecording = false;
 
   @override
@@ -36,7 +35,7 @@ class _RecordButtonState extends State<RecordButton> {
         if (!_isRecording) return;
 
         // Si estamos grabando, guardamos en la BD
-        dataManager.addData(currentSessionId, bytes.toList());
+        dataManager.addData(bytes);
       });
 
       _subscriptions.add(sub);
@@ -60,12 +59,11 @@ class _RecordButtonState extends State<RecordButton> {
 
     if (_isRecording) {
       debugPrint("🎙️ Inicio de grabación con $patientName...");
-      currentSessionId = await dataManager.startSession(patientName);
+      await dataManager.startSession(patientName);
 
     } else {
       debugPrint("🛑 Grabación detenida.");
-      await dataManager.stopSession(currentSessionId);
-      currentSessionId = 0;
+      await dataManager.stopSession();
     }
   }
 
